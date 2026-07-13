@@ -1,63 +1,70 @@
-# 🦜️🔗 LangChain {partner}
+# 🦜️🔗 LangChain PolarDB-X
 
-This repository contains 1 package with {partner} integrations with LangChain:
+This repository contains 1 package with PolarDB-X integrations with LangChain:
 
-- [langchain-{package_lower}](https://pypi.org/project/langchain-{package_lower}/)
+- [langchain-polardbx](https://pypi.org/project/langchain-polardbx/)
 
-## Initial Repo Checklist (Remove this section after completing)
+## Installation
 
-Welcome to the LangChain Partner Integration Repository! This checklist will help you get started with your new repository.
+```bash
+pip install langchain-polardbx
+```
 
-After creating your repo from the integration-repo-template, we'll go through how to
-set up your new repository in Github.
+## Quick Start
 
-This setup assumes that the partner package is already split. For those instructions,
-see [these docs](https://docs.langchain.com/oss/python/contributing/integrations-langchain).
+```python
+from langchain_polardbx import PolarDBXVectorStore
+from langchain_core.embeddings import DeterministicFakeEmbedding
 
-> [!NOTE]
-> Integration packages can be managed in your own Github organization.
+vectorstore = PolarDBXVectorStore(
+    host="your-host",
+    port=3306,
+    user="your-user",
+    password="your-password",
+    database="your-database",
+    embedding=DeterministicFakeEmbedding(embedding=128),
+    table_name="my_vectors",
+)
 
-Code (auto ecli)
+# Add texts
+vectorstore.add_texts(["Hello world", "PolarDB-X is great"])
 
-- [ ] Fill out the readme above (for folks that follow pypi link)
-- [ ] Copy package into /libs folder
-- [ ] Update `"Source Code"` and `repository` under `[project.urls]` in /libs/*/pyproject.toml
+# Search
+results = vectorstore.similarity_search("Hello", k=2)
+```
 
-Workflow code (auto ecli)
+## Features
 
-- [ ] Populate .github/workflows/_release.yml with `on.workflow_dispatch.inputs.working-directory.default`
-- [ ] Configure `LIB_DIRS` in .github/scripts/check_diff.py
+- Native PolarDB-X VECTOR data type and HNSW index support
+- Cosine and Euclidean distance metrics
+- Dynamic vector index management (create/drop at runtime)
+- ef_search tuning per query
+- ANN/KNN search mode switching (FORCE INDEX)
+- Vector index runtime monitoring (get_stats)
+- OPTIMIZE TABLE for index rebuild
+- Full async support (aadd_texts, asimilarity_search, etc.)
+- Metadata filtering with JSON path operators
+- MMR (Maximal Marginal Relevance) search
+- Connection pooling with retry logic
 
-Workflow code (manual)
+## Development
 
-- [ ] Add secrets as env vars in .github/workflows/_release.yml
+This package uses [uv](https://docs.astral.sh/uv/) for dependency management.
 
-Monorepo workflow code (manual)
+```bash
+# Install dependencies
+uv sync --group test --group test_integration
 
-- [ ] Pull in new code location, remove old in .github/workflows/api_doc_build.yml
+# Run unit tests
+make test
 
-In github (manual)
+# Run integration tests
+make integration_tests
 
-- [ ] Add any required integration testing secrets in Github
-- [ ] Add any required partner collaborators in Github
-- [ ] "Allow auto-merge" in General Settings (recommended)
-- [ ] Only "Allow squash merging" in General Settings (recommended)
-- [ ] Set up ruleset matching CI build (recommended)
-    - name: ci build
-    - enforcement: active
-    - bypass: write
-    - target: default branch
-    - rules: restrict deletions, require status checks ("CI Success"), block force pushes
-- [ ] Set up ruleset (recommended)
-    - name: require prs
-    - enforcement: active
-    - bypass: none
-    - target: default branch
-    - rules: restrict deletions, require a pull request before merging (0 approvals, no boxes), block force pushes
+# Lint
+make lint
+```
 
-Pypi (manual)
+## License
 
-- [ ] Add new repo to test-pypi and pypi trusted publishing
-
-> [!NOTE]
-> Tag [@ccurme](https://github.com/ccurme) if you have questions on any step.
+MIT
