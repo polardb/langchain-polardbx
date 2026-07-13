@@ -287,6 +287,32 @@ class PolarDBXVectorStore(VectorStore):
             )
         return table_name
 
+    @staticmethod
+    def _validate_identifier(name: str, label: str = "identifier") -> str:
+        """Validate a SQL identifier (index name, etc.) to prevent SQL injection.
+
+        Args:
+            name: The identifier to validate.
+            label: Human-readable label for error messages.
+
+        Returns:
+            The validated identifier.
+
+        Raises:
+            ValueError: If the identifier is invalid.
+        """
+        if not re.match(r"^[a-zA-Z_][a-zA-Z0-9_]*$", name):
+            raise ValueError(
+                f"Invalid {label}: {name}. "
+                "Must start with a letter or underscore, "
+                "and contain only alphanumeric characters and underscores."
+            )
+        if len(name) > 64:
+            raise ValueError(
+                f"{label.capitalize()} too long: {name}. Maximum length is 64 characters."
+            )
+        return name
+
     def close(self) -> None:
         """Close the connection pool.
 
@@ -568,7 +594,6 @@ class PolarDBXVectorStore(VectorStore):
                         or row.get("CREATE TABLE")
                         or ""
                     )
-                    import re
                     m = re.search(
                         r"VECTOR INDEX `([^`]+)`", create_sql, re.IGNORECASE
                     )
@@ -613,8 +638,13 @@ class PolarDBXVectorStore(VectorStore):
             distance: Distance function ("COSINE" or "EUCLIDEAN").
                 Defaults to the store's distance_strategy.
         """
+        self._validate_identifier(index_name, "index name")
         m_val = m or self._hnsw_m
         dist_val = (distance or self._distance_strategy).upper()
+        if dist_val not in ("COSINE", "EUCLIDEAN"):
+            raise ValueError(
+                f"Invalid distance function: {dist_val}. Must be 'COSINE' or 'EUCLIDEAN'."
+            )
         with self._get_cursor() as cursor:
             cursor.execute(
                 f"ALTER TABLE `{self._table_name}` "
@@ -676,8 +706,13 @@ class PolarDBXVectorStore(VectorStore):
         distance: Optional[str] = None,
     ) -> None:
         """Async create a vector index on the embedding column."""
+        self._validate_identifier(index_name, "index name")
         m_val = m or self._hnsw_m
         dist_val = (distance or self._distance_strategy).upper()
+        if dist_val not in ("COSINE", "EUCLIDEAN"):
+            raise ValueError(
+                f"Invalid distance function: {dist_val}. Must be 'COSINE' or 'EUCLIDEAN'."
+            )
         async with self._aget_cursor() as cursor:
             await cursor.execute(
                 f"ALTER TABLE `{self._table_name}` "
@@ -783,10 +818,10 @@ class PolarDBXVectorStore(VectorStore):
     def _distance_to_similarity(self, distance: float) -> float:
         """Convert distance to similarity score."""
         if self._distance_strategy == "cosine":
-            # For cosine distance: similarity = 1 - distance
-            return 1.0 - distance
+            # For cosine distance [0, 2]: similarity = 1 - distance/2
+            return max(0.0, 1.0 - distance / 2.0)
         else:
-            # For euclidean distance: similarity = 1 / (1 + distance)
+            # For euclidean distance [0, inf): similarity = 1 / (1 + distance)
             return 1.0 / (1.0 + distance)
 
     def _build_filter_clause(
@@ -824,6 +859,13 @@ class PolarDBXVectorStore(VectorStore):
         params: List[Any] = []
 
         for key, value in filter.items():
+            # Validate key to prevent SQL injection in JSON path
+            if not re.match(r"^[a-zA-Z_][a-zA-Z0-9_]*$", str(key)):
+                raise ValueError(
+                    f"Invalid filter key: {key}. "
+                    "Keys must start with a letter or underscore, "
+                    "and contain only alphanumeric characters and underscores."
+                )
             # Use JSON_EXTRACT for numeric comparisons, JSON_UNQUOTE for string
             json_path_str = f"JSON_UNQUOTE(JSON_EXTRACT(metadata, '$.{key}'))"
             json_path_num = f"JSON_EXTRACT(metadata, '$.{key}')"
@@ -2549,9 +2591,15 @@ class PolarDBXVectorStore(VectorStore):
 
     def clear(self) -> None:
         """Clear all data from the table."""
-        with self._get_cursor() as cursor:
-            cursor.execute(f"TRUNCATE TABLE `{self._table_name}`")
-        logger.info("Cleared all data from table %s", self._table_name)
+        try:
+            with self._get_cursor() as cursor:
+                cursor.execute(f"TRUNCATE TABLE `{self._table_name}`")
+            logger.info("Cleared all data from table %s", self._table_name)
+        except Exception as e:
+            if "1146" in str(e) or "doesn't exist" in str(e).lower():
+                logger.debug("Table %s does not exist, skipping clear", self._table_name)
+            else:
+                raise
 
     async def aclear(self) -> None:
         """Async clear all data from the table."""
@@ -2561,10 +2609,15 @@ class PolarDBXVectorStore(VectorStore):
 
     def count(self) -> int:
         """Get the number of vectors in the table."""
-        with self._get_cursor() as cursor:
-            cursor.execute(f"SELECT COUNT(*) as count FROM `{self._table_name}`")
-            result = cursor.fetchone()
-            return result["count"] if result else 0
+        try:
+            with self._get_cursor() as cursor:
+                cursor.execute(f"SELECT COUNT(*) as count FROM `{self._table_name}`")
+                result = cursor.fetchone()
+                return result["count"] if result else 0
+        except Exception as e:
+            if "1146" in str(e) or "doesn't exist" in str(e).lower():
+                return 0
+            raise
 
     async def acount(self) -> int:
         """Async get the number of vectors in the table."""
@@ -2671,9 +2724,14 @@ class PolarDBXVectorStore(VectorStore):
 
         sql = f"DELETE FROM `{self._table_name}` {where_clause}"
 
-        with self._get_cursor() as cursor:
-            cursor.execute(sql, params)
-            deleted_count = cursor.rowcount
+        try:
+            with self._get_cursor() as cursor:
+                cursor.execute(sql, params)
+                deleted_count = cursor.rowcount
+        except Exception as e:
+            if "1146" in str(e) or "doesn't exist" in str(e).lower():
+                return 0
+            raise
 
         logger.info(
             "Deleted %d documents from table %s by metadata",
