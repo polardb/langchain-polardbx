@@ -22,7 +22,7 @@ vectorstore = PolarDBXVectorStore(
     user="your-user",
     password="your-password",
     database="your-database",
-    embedding=DeterministicFakeEmbedding(embedding=128),
+    embedding=DeterministicFakeEmbedding(embedding_size=128),
     table_name="my_vectors",
 )
 
@@ -39,7 +39,7 @@ results = vectorstore.similarity_search("Hello", k=2)
 - Cosine and Euclidean distance metrics
 - Dynamic vector index management (create/drop at runtime)
 - ef_search tuning per query
-- ANN/KNN search mode switching (FORCE INDEX)
+- ANN/KNN search mode switching
 - Vector index runtime monitoring (get_stats)
 - OPTIMIZE TABLE for index rebuild
 - Full async support (aadd_texts, asimilarity_search, etc.)

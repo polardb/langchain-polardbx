@@ -227,8 +227,12 @@ class PolarDBXVectorStore(VectorStore):
         self._async_pool: Optional[Any] = None
         self._async_pool_lock = asyncio.Lock()
 
-        # Check vector support
-        self._check_vector_support()
+        # Check vector support — close pool on failure to avoid resource leak
+        try:
+            self._check_vector_support()
+        except Exception:
+            self.close()
+            raise
 
         # Handle table creation
         if pre_delete_table:
@@ -1259,10 +1263,6 @@ class PolarDBXVectorStore(VectorStore):
         texts = [te[0] for te in text_embeddings_list]
         embeddings = [te[1] for te in text_embeddings_list]
 
-        # Ensure table exists with correct dimension
-        dimension = len(embeddings[0])
-        self._create_table_if_not_exists(dimension)
-
         # Prepare IDs
         if ids is None:
             ids = [str(uuid.uuid4()) for _ in text_embeddings_list]
@@ -1271,12 +1271,7 @@ class PolarDBXVectorStore(VectorStore):
         if metadatas is None:
             metadatas = [{} for _ in text_embeddings_list]
 
-        # Validate lengths
-        if len(texts) != len(embeddings):
-            raise ValueError(
-                f"Number of texts ({len(texts)}) must match "
-                f"number of embeddings ({len(embeddings)})"
-            )
+        # Validate lengths before creating table
         if len(texts) != len(metadatas):
             raise ValueError(
                 f"Number of texts ({len(texts)}) must match "
@@ -1286,6 +1281,10 @@ class PolarDBXVectorStore(VectorStore):
             raise ValueError(
                 f"Number of texts ({len(texts)}) must match number of ids ({len(ids)})"
             )
+
+        # Ensure table exists with correct dimension
+        dimension = len(embeddings[0])
+        self._create_table_if_not_exists(dimension)
 
         # Insert in batches
         with self._get_cursor() as cursor:
@@ -1344,10 +1343,6 @@ class PolarDBXVectorStore(VectorStore):
         texts = [te[0] for te in text_embeddings_list]
         embeddings = [te[1] for te in text_embeddings_list]
 
-        # Ensure table exists with correct dimension
-        dimension = len(embeddings[0])
-        await self._acreate_table_if_not_exists(dimension)
-
         # Prepare IDs
         if ids is None:
             ids = [str(uuid.uuid4()) for _ in text_embeddings_list]
@@ -1356,12 +1351,7 @@ class PolarDBXVectorStore(VectorStore):
         if metadatas is None:
             metadatas = [{} for _ in text_embeddings_list]
 
-        # Validate lengths
-        if len(texts) != len(embeddings):
-            raise ValueError(
-                f"Number of texts ({len(texts)}) must match "
-                f"number of embeddings ({len(embeddings)})"
-            )
+        # Validate lengths before creating table
         if len(texts) != len(metadatas):
             raise ValueError(
                 f"Number of texts ({len(texts)}) must match "
@@ -1371,6 +1361,10 @@ class PolarDBXVectorStore(VectorStore):
             raise ValueError(
                 f"Number of texts ({len(texts)}) must match number of ids ({len(ids)})"
             )
+
+        # Ensure table exists with correct dimension
+        dimension = len(embeddings[0])
+        await self._acreate_table_if_not_exists(dimension)
 
         # Insert in batches
         async with self._aget_cursor() as cursor:
@@ -2861,3 +2855,106 @@ class PolarDBXVectorStore(VectorStore):
                 (id,),
             )
             return cursor.fetchone() is not None
+
+    async def asearch_by_metadata(
+        self,
+        filter: Optional[Dict[str, Any]] = None,
+        limit: int = 10,
+    ) -> List[Document]:
+        """Async search documents by metadata conditions only (no vector similarity).
+
+        Args:
+            filter: Filter dictionary with optional operators.
+            limit: Maximum number of results to return. Defaults to 10.
+
+        Returns:
+            List of Documents matching the metadata filter.
+        """
+        where_clause, params = self._build_filter_clause(filter)
+
+        sql = f"""
+        SELECT id, text, metadata
+        FROM `{self._table_name}`
+        {where_clause}
+        LIMIT %s
+        """
+
+        params.append(limit)
+
+        try:
+            async with self._aget_cursor() as cursor:
+                await cursor.execute(sql, params)
+
+                documents = []
+                for record in cursor:
+                    metadata = record["metadata"]
+                    if isinstance(metadata, str):
+                        metadata = json.loads(metadata)
+
+                    documents.append(
+                        Document(
+                            id=record["id"],
+                            page_content=record["text"],
+                            metadata=metadata or {},
+                        )
+                    )
+        except Exception as e:
+            if "1146" in str(e) or "doesn't exist" in str(e).lower():
+                return []
+            raise
+
+        return documents
+
+    async def adelete_by_metadata(
+        self,
+        filter: Dict[str, Any],
+    ) -> int:
+        """Async delete documents matching metadata conditions.
+
+        Args:
+            filter: Filter dictionary (required).
+
+        Returns:
+            Number of deleted documents.
+        """
+        if not filter:
+            raise ValueError("'filter' must be provided for adelete_by_metadata")
+
+        where_clause, params = self._build_filter_clause(filter)
+
+        if not where_clause:
+            raise ValueError("Filter resulted in empty condition")
+
+        sql = f"DELETE FROM `{self._table_name}` {where_clause}"
+
+        try:
+            async with self._aget_cursor() as cursor:
+                await cursor.execute(sql, params)
+                deleted_count = cursor.rowcount
+        except Exception as e:
+            if "1146" in str(e) or "doesn't exist" in str(e).lower():
+                return 0
+            raise
+
+        logger.info(
+            "Deleted %d documents from table %s by metadata (async)",
+            deleted_count,
+            self._table_name,
+        )
+        return deleted_count
+
+    async def aexists(self, id: str) -> bool:
+        """Async check if a document with the given ID exists.
+
+        Args:
+            id: The document ID to check.
+
+        Returns:
+            True if the document exists, False otherwise.
+        """
+        async with self._aget_cursor() as cursor:
+            await cursor.execute(
+                f"SELECT 1 FROM `{self._table_name}` WHERE id = %s LIMIT 1",
+                (id,),
+            )
+            return await cursor.fetchone() is not None
