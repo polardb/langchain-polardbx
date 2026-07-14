@@ -174,7 +174,9 @@ class PolarDBXVectorStore(VectorStore):
             retry_delay: Delay between retry attempts in seconds. Defaults to 1.0.
             vector_index_name: Name of the vector index for FORCE INDEX hints.
                 If None, auto-detected on first use. Defaults to None.
-            **kwargs: Additional keyword arguments.
+            **kwargs: Additional connection arguments passed to both sync and
+                async connection pools (e.g. ssl_ca, ssl_cert, ssl_key,
+                ssl_disabled for SSL/TLS encryption).
         """
         try:
             import mysql.connector.pooling
@@ -198,6 +200,7 @@ class PolarDBXVectorStore(VectorStore):
         self._connection_retries = connection_retries
         self._retry_delay = retry_delay
         self._vector_index_name = vector_index_name
+        self._conn_kwargs = kwargs  # Extra connection args (e.g. SSL params)
 
         # Validate distance strategy
         if self._distance_strategy not in ("cosine", "euclidean"):
@@ -221,6 +224,8 @@ class PolarDBXVectorStore(VectorStore):
             "connect_timeout": 30,  # Connection timeout in seconds
             "connection_timeout": 30,  # Alias for connect_timeout
         }
+        # Merge extra connection args (e.g. SSL/TLS params) from kwargs
+        pool_config.update(self._conn_kwargs)
         self._pool = mysql.connector.pooling.MySQLConnectionPool(**pool_config)  # type: ignore[arg-type]
 
         # Async pool will be lazily initialized
@@ -460,6 +465,7 @@ class PolarDBXVectorStore(VectorStore):
                         minsize=1,
                         maxsize=self._pool_size,
                         connect_timeout=30,
+                        **self._conn_kwargs,
                     )
                     return self._async_pool
                 except Exception as e:
@@ -2886,7 +2892,7 @@ class PolarDBXVectorStore(VectorStore):
                 await cursor.execute(sql, params)
 
                 documents = []
-                for record in cursor:
+                async for record in cursor:
                     metadata = record["metadata"]
                     if isinstance(metadata, str):
                         metadata = json.loads(metadata)
