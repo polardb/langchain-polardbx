@@ -16,12 +16,11 @@ from collections.abc import Generator
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 import pytest
+from _helpers import DB_HOST, DB_NAME, DB_PASS, DB_PORT, DB_USER
 from langchain_core.vectorstores import VectorStore
 from langchain_tests.integration_tests import VectorStoreIntegrationTests
 
 from langchain_polardbx import PolarDBXVectorStore
-
-from _helpers import DB_HOST, DB_PORT, DB_USER, DB_PASS, DB_NAME
 
 
 class TestPolarDBXStandard(VectorStoreIntegrationTests):
@@ -53,8 +52,3 @@ class TestPolarDBXStandard(VectorStoreIntegrationTests):
             except Exception:
                 pass
             store.close()
-"""Standard LangChain interface tests.
-
-This file will implement the VectorStoreIntegrationTests standard test suite.
-TODO: Implement after langchain-tests is configured.
-"""

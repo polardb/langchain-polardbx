@@ -259,7 +259,7 @@ class PolarDBXVectorStore(VectorStore):
     @staticmethod
     def _euclidean_relevance_score_fn(distance: float) -> float:
         """Convert euclidean distance to relevance score (0-1)."""
-        return max(0.0, 1.0 - distance)
+        return 1.0 / (1.0 + distance)
 
     @staticmethod
     def _validate_table_name(table_name: str) -> str:
@@ -324,8 +324,10 @@ class PolarDBXVectorStore(VectorStore):
                 pool = self._pool
                 self._pool = None  # type: ignore
 
-                # Access the internal queue directly to avoid blocking
-                # MySQL Connector's pool stores connections in _cnx_queue
+                # Access the internal queue directly to avoid blocking.
+                # MySQL Connector's pool stores connections in _cnx_queue.
+                # This is a private API and may break in future versions of
+                # mysql-connector-python. If it does, fall back to pool.closeall().
                 if hasattr(pool, "_cnx_queue"):
                     while not pool._cnx_queue.empty():
                         try:
@@ -543,8 +545,8 @@ class PolarDBXVectorStore(VectorStore):
                 result = cursor.fetchone()
                 if result and result.get("Value", "").upper() == "ON":
                     raise ValueError(
-                        "PolarDB-X 向量索引功能未开启。"
-                        "请执行 SET GLOBAL vidx_disabled = OFF 并重新连接。"
+                        "PolarDB-X vector index is disabled. "
+                        "Please execute SET GLOBAL vidx_disabled = OFF and reconnect."
                     )
 
                 # Verify vector functions are available
@@ -554,9 +556,9 @@ class PolarDBXVectorStore(VectorStore):
                 result = cursor.fetchone()
                 if not result or not result.get("vector_support"):
                     raise ValueError(
-                        "PolarDB-X 向量函数不可用。"
-                        "请检查 DN 版本是否 >= 20260605，"
-                        "并确认向量索引功能已开启。"
+                        "PolarDB-X vector functions are not available. "
+                        "Please verify the DN version is >= 20260605 "
+                        "and vector index support is enabled."
                     )
 
             except ValueError:
@@ -569,16 +571,6 @@ class PolarDBXVectorStore(VectorStore):
                         "并确认向量索引功能已开启。"
                     ) from e
                 raise
-
-    def _get_embedding_dimension(self) -> int:
-        """Get the embedding dimension."""
-        if self._embedding_dimension is not None:
-            return self._embedding_dimension
-
-        # Infer from embedding model
-        sample_embedding = self._embedding.embed_query("test")
-        self._embedding_dimension = len(sample_embedding)
-        return self._embedding_dimension
 
     def _detect_vector_index_name(self) -> Optional[str]:
         """Auto-detect the vector index name from SHOW CREATE TABLE."""
@@ -605,11 +597,16 @@ class PolarDBXVectorStore(VectorStore):
         return None
 
     def _build_index_hint(self, search_type: Optional[str]) -> str:
-        """Build FORCE INDEX hint string for search_type."""
+        """Build index hint string for search_type.
+
+        - knn: USE INDEX() to force full table scan (brute force)
+        - ann: FORCE INDEX(vector_index) to force vector index usage
+        - auto/None: no hint, let optimizer decide
+        """
         if search_type is None or search_type == "auto":
             return ""
         if search_type == "knn":
-            return " FORCE INDEX(PRIMARY)"
+            return " USE INDEX()"
         if search_type == "ann":
             idx_name = self._detect_vector_index_name()
             if idx_name:
@@ -823,6 +820,76 @@ class PolarDBXVectorStore(VectorStore):
         else:
             # For euclidean distance [0, inf): similarity = 1 / (1 + distance)
             return 1.0 / (1.0 + distance)
+
+    def _fetch_embeddings_by_ids(self, ids: List[str]) -> List[List[float]]:
+        """Fetch embedding vectors from the database by document IDs.
+
+        Args:
+            ids: List of document IDs.
+
+        Returns:
+            List of embedding vectors in the same order as input ids.
+            Empty list for any ID not found.
+        """
+        if not ids:
+            return []
+        placeholders = ", ".join(["%s"] * len(ids))
+        sql = f"""
+        SELECT id, CAST(embedding AS CHAR) as emb_str
+        FROM `{self._table_name}`
+        WHERE id IN ({placeholders})
+        """
+        id_to_emb: Dict[str, List[float]] = {}
+        try:
+            with self._get_cursor() as cursor:
+                cursor.execute(sql, ids)
+                for row in cursor:
+                    emb_str = row["emb_str"]
+                    if isinstance(emb_str, str) and emb_str:
+                        try:
+                            id_to_emb[row["id"]] = json.loads(emb_str)
+                        except (json.JSONDecodeError, ValueError):
+                            pass
+        except Exception as e:
+            if "1146" in str(e) or "doesn't exist" in str(e).lower():
+                return []
+            raise
+        return [id_to_emb.get(id_, []) for id_ in ids]
+
+    async def _afetch_embeddings_by_ids(self, ids: List[str]) -> List[List[float]]:
+        """Async fetch embedding vectors from the database by document IDs.
+
+        Args:
+            ids: List of document IDs.
+
+        Returns:
+            List of embedding vectors in the same order as input ids.
+            Empty list for any ID not found.
+        """
+        if not ids:
+            return []
+        placeholders = ", ".join(["%s"] * len(ids))
+        sql = f"""
+        SELECT id, CAST(embedding AS CHAR) as emb_str
+        FROM `{self._table_name}`
+        WHERE id IN ({placeholders})
+        """
+        id_to_emb: Dict[str, List[float]] = {}
+        try:
+            async with self._aget_cursor() as cursor:
+                await cursor.execute(sql, ids)
+                async for row in cursor:
+                    emb_str = row["emb_str"]
+                    if isinstance(emb_str, str) and emb_str:
+                        try:
+                            id_to_emb[row["id"]] = json.loads(emb_str)
+                        except (json.JSONDecodeError, ValueError):
+                            pass
+        except Exception as e:
+            if "1146" in str(e) or "doesn't exist" in str(e).lower():
+                return []
+            raise
+        return [id_to_emb.get(id_, []) for id_ in ids]
 
     def _build_filter_clause(
         self,
@@ -1611,7 +1678,7 @@ class PolarDBXVectorStore(VectorStore):
                   or "auto" (let optimizer decide). Default: "auto".
 
         Returns:
-            List of tuples of (Document, similarity_score).
+            List of tuples of (Document, distance_score). Lower distance means more similar.
         """
         # Extract Phase 2 enhancement params
         ef_search = kwargs.pop("ef_search", None)
@@ -1640,7 +1707,9 @@ class PolarDBXVectorStore(VectorStore):
             where_clause=where_clause,
         )
 
-        query_params = [query_vector_str] + filter_params + [k]
+        # When score_threshold is set, fetch more candidates to compensate for filtering
+        fetch_k = k * 3 if score_threshold is not None else k
+        query_params = [query_vector_str] + filter_params + [fetch_k]
 
         results: List[Tuple[Document, float]] = []
 
@@ -1651,11 +1720,12 @@ class PolarDBXVectorStore(VectorStore):
 
                 for record in cursor:
                     distance = float(record["distance"])
-                    similarity = self._distance_to_similarity(distance)
 
-                    # Apply score threshold
-                    if score_threshold is not None and similarity < score_threshold:
-                        continue
+                    # Apply score threshold (threshold is a similarity value)
+                    if score_threshold is not None:
+                        similarity = self._distance_to_similarity(distance)
+                        if similarity < score_threshold:
+                            continue
 
                     metadata = record["metadata"]
                     if isinstance(metadata, str):
@@ -1666,7 +1736,7 @@ class PolarDBXVectorStore(VectorStore):
                         page_content=record["text"],
                         metadata=metadata or {},
                     )
-                    results.append((doc, similarity))
+                    results.append((doc, distance))
         except Exception as e:
             # If table doesn't exist (error 1146), return empty list
             error_msg = str(e)
@@ -1677,7 +1747,7 @@ class PolarDBXVectorStore(VectorStore):
                 return []
             raise
 
-        return results
+        return results[:k]
 
     async def asimilarity_search(
         self,
@@ -1774,7 +1844,7 @@ class PolarDBXVectorStore(VectorStore):
                 - search_type: str — "ann", "knn", or "auto". Default: "auto".
 
         Returns:
-            List of tuples of (Document, similarity_score).
+            List of tuples of (Document, distance_score). Lower distance means more similar.
         """
         # Extract Phase 2 enhancement params
         ef_search = kwargs.pop("ef_search", None)
@@ -1803,7 +1873,9 @@ class PolarDBXVectorStore(VectorStore):
             where_clause=where_clause,
         )
 
-        query_params = [query_vector_str] + filter_params + [k]
+        # When score_threshold is set, fetch more candidates to compensate for filtering
+        fetch_k = k * 3 if score_threshold is not None else k
+        query_params = [query_vector_str] + filter_params + [fetch_k]
 
         results: List[Tuple[Document, float]] = []
 
@@ -1817,11 +1889,12 @@ class PolarDBXVectorStore(VectorStore):
 
                 async for record in cursor:
                     distance = float(record["distance"])
-                    similarity = self._distance_to_similarity(distance)
 
-                    # Apply score threshold
-                    if score_threshold is not None and similarity < score_threshold:
-                        continue
+                    # Apply score threshold (threshold is a similarity value)
+                    if score_threshold is not None:
+                        similarity = self._distance_to_similarity(distance)
+                        if similarity < score_threshold:
+                            continue
 
                     metadata = record["metadata"]
                     if isinstance(metadata, str):
@@ -1832,7 +1905,7 @@ class PolarDBXVectorStore(VectorStore):
                         page_content=record["text"],
                         metadata=metadata or {},
                     )
-                    results.append((doc, similarity))
+                    results.append((doc, distance))
         except Exception as e:
             # If table doesn't exist (error 1146), return empty list
             error_msg = str(e)
@@ -1843,7 +1916,7 @@ class PolarDBXVectorStore(VectorStore):
                 return []
             raise
 
-        return results
+        return results[:k]
 
     def delete(
         self,
@@ -2018,11 +2091,11 @@ class PolarDBXVectorStore(VectorStore):
         embedding: Embeddings,
         metadatas: Optional[List[dict]] = None,
         *,
-        host: str = "localhost",
+        host: str,
         port: int = 3306,
-        user: str = "root",
-        password: str = "",
-        database: str = "langchain",
+        user: str,
+        password: str,
+        database: str,
         table_name: str = "polardbx_vectors",
         distance_strategy: Literal["cosine", "euclidean"] = "cosine",
         hnsw_m: int = 6,
@@ -2035,11 +2108,11 @@ class PolarDBXVectorStore(VectorStore):
             texts: List of texts to add to the vector store.
             embedding: Embedding model to use.
             metadatas: Optional list of metadata dictionaries.
-            host: MySQL host. Defaults to "localhost".
+            host: MySQL host (required).
             port: MySQL port. Defaults to 3306.
-            user: MySQL user. Defaults to "root".
-            password: MySQL password. Defaults to "".
-            database: MySQL database. Defaults to "langchain".
+            user: MySQL user (required).
+            password: MySQL password (required).
+            database: MySQL database (required).
             table_name: Table name. Defaults to "polardbx_vectors".
             distance_strategy: Distance strategy. Defaults to "cosine".
             hnsw_m: HNSW M parameter. Defaults to 6.
@@ -2070,11 +2143,11 @@ class PolarDBXVectorStore(VectorStore):
         documents: List[Document],
         embedding: Embeddings,
         *,
-        host: str = "localhost",
+        host: str,
         port: int = 3306,
-        user: str = "root",
-        password: str = "",
-        database: str = "langchain",
+        user: str,
+        password: str,
+        database: str,
         table_name: str = "polardbx_vectors",
         distance_strategy: Literal["cosine", "euclidean"] = "cosine",
         hnsw_m: int = 6,
@@ -2086,11 +2159,11 @@ class PolarDBXVectorStore(VectorStore):
         Args:
             documents: List of documents to add.
             embedding: Embedding model to use.
-            host: MySQL host. Defaults to "localhost".
+            host: MySQL host (required).
             port: MySQL port. Defaults to 3306.
-            user: MySQL user. Defaults to "root".
-            password: MySQL password. Defaults to "".
-            database: MySQL database. Defaults to "langchain".
+            user: MySQL user (required).
+            password: MySQL password (required).
+            database: MySQL database (required).
             table_name: Table name. Defaults to "polardbx_vectors".
             distance_strategy: Distance strategy. Defaults to "cosine".
             hnsw_m: HNSW M parameter. Defaults to 6.
@@ -2104,9 +2177,12 @@ class PolarDBXVectorStore(VectorStore):
         metadatas = [doc.metadata for doc in documents]
 
         if ids is None:
-            ids = [doc.id for doc in documents if doc.id]
-            if len(ids) != len(documents):
-                ids = None
+            ids = []
+            for doc in documents:
+                if doc.id is not None:
+                    ids.append(doc.id)
+                else:
+                    ids.append(str(uuid.uuid4()))
 
         return cls.from_texts(
             texts=texts,
@@ -2131,11 +2207,11 @@ class PolarDBXVectorStore(VectorStore):
         embedding: Embeddings,
         metadatas: Optional[List[dict]] = None,
         *,
-        host: str = "localhost",
+        host: str,
         port: int = 3306,
-        user: str = "root",
-        password: str = "",
-        database: str = "langchain",
+        user: str,
+        password: str,
+        database: str,
         table_name: str = "polardbx_vectors",
         distance_strategy: Literal["cosine", "euclidean"] = "cosine",
         hnsw_m: int = 6,
@@ -2148,11 +2224,11 @@ class PolarDBXVectorStore(VectorStore):
             texts: List of texts to add to the vector store.
             embedding: Embedding model to use.
             metadatas: Optional list of metadata dictionaries.
-            host: MySQL host. Defaults to "localhost".
+            host: MySQL host (required).
             port: MySQL port. Defaults to 3306.
-            user: MySQL user. Defaults to "root".
-            password: MySQL password. Defaults to "".
-            database: MySQL database. Defaults to "langchain".
+            user: MySQL user (required).
+            password: MySQL password (required).
+            database: MySQL database (required).
             table_name: Table name. Defaults to "polardbx_vectors".
             distance_strategy: Distance strategy. Defaults to "cosine".
             hnsw_m: HNSW M parameter. Defaults to 6.
@@ -2183,11 +2259,11 @@ class PolarDBXVectorStore(VectorStore):
         documents: List[Document],
         embedding: Embeddings,
         *,
-        host: str = "localhost",
+        host: str,
         port: int = 3306,
-        user: str = "root",
-        password: str = "",
-        database: str = "langchain",
+        user: str,
+        password: str,
+        database: str,
         table_name: str = "polardbx_vectors",
         distance_strategy: Literal["cosine", "euclidean"] = "cosine",
         hnsw_m: int = 6,
@@ -2199,11 +2275,11 @@ class PolarDBXVectorStore(VectorStore):
         Args:
             documents: List of documents to add.
             embedding: Embedding model to use.
-            host: MySQL host. Defaults to "localhost".
+            host: MySQL host (required).
             port: MySQL port. Defaults to 3306.
-            user: MySQL user. Defaults to "root".
-            password: MySQL password. Defaults to "".
-            database: MySQL database. Defaults to "langchain".
+            user: MySQL user (required).
+            password: MySQL password (required).
+            database: MySQL database (required).
             table_name: Table name. Defaults to "polardbx_vectors".
             distance_strategy: Distance strategy. Defaults to "cosine".
             hnsw_m: HNSW M parameter. Defaults to 6.
@@ -2217,9 +2293,12 @@ class PolarDBXVectorStore(VectorStore):
         metadatas = [doc.metadata for doc in documents]
 
         if ids is None:
-            ids = [doc.id for doc in documents if doc.id]
-            if len(ids) != len(documents):
-                ids = None
+            ids = []
+            for doc in documents:
+                if doc.id is not None:
+                    ids.append(doc.id)
+                else:
+                    ids.append(str(uuid.uuid4()))
 
         return await cls.afrom_texts(
             texts=texts,
@@ -2305,11 +2384,14 @@ class PolarDBXVectorStore(VectorStore):
         if not docs_with_scores:
             return []
 
-        # Extract embeddings for MMR calculation
-        # Note: We need to re-embed the documents for MMR
-        # This is a limitation - ideally we'd store and retrieve the embeddings
-        doc_texts = [doc.page_content for doc, _ in docs_with_scores]
-        doc_embeddings = self._embedding.embed_documents(doc_texts)
+        # Fetch stored embeddings from the database
+        doc_ids = [doc.id for doc, _ in docs_with_scores]
+        doc_embeddings = self._fetch_embeddings_by_ids(doc_ids)
+
+        # Fallback to re-embedding if database fetch fails
+        if not doc_embeddings or any(len(e) == 0 for e in doc_embeddings):
+            doc_texts = [doc.page_content for doc, _ in docs_with_scores]
+            doc_embeddings = self._embedding.embed_documents(doc_texts)
 
         # Apply MMR
         selected_indices = self._maximal_marginal_relevance(
@@ -2395,18 +2477,19 @@ class PolarDBXVectorStore(VectorStore):
         if not docs_with_scores:
             return []
 
-        # Extract embeddings for MMR calculation
-        # Note: We need to re-embed the documents for MMR
-        # This is a limitation - ideally we'd store and retrieve the embeddings
-        doc_texts = [doc.page_content for doc, _ in docs_with_scores]
+        # Fetch stored embeddings from the database
+        doc_ids = [doc.id for doc, _ in docs_with_scores]
+        doc_embeddings = await self._afetch_embeddings_by_ids(doc_ids)
 
-        # Generate embeddings (use async if available)
-        if hasattr(self._embedding, "aembed_documents"):
-            doc_embeddings = await self._embedding.aembed_documents(doc_texts)
-        else:
-            doc_embeddings = await run_in_executor(
-                None, self._embedding.embed_documents, doc_texts
-            )
+        # Fallback to re-embedding if database fetch fails
+        if not doc_embeddings or any(len(e) == 0 for e in doc_embeddings):
+            doc_texts = [doc.page_content for doc, _ in docs_with_scores]
+            if hasattr(self._embedding, "aembed_documents"):
+                doc_embeddings = await self._embedding.aembed_documents(doc_texts)
+            else:
+                doc_embeddings = await run_in_executor(
+                    None, self._embedding.embed_documents, doc_texts
+                )
 
         # Apply MMR
         selected_indices = self._maximal_marginal_relevance(
@@ -2450,8 +2533,12 @@ class PolarDBXVectorStore(VectorStore):
         if not docs_with_scores:
             return []
 
-        doc_texts = [doc.page_content for doc, _ in docs_with_scores]
-        doc_embeddings = self._embedding.embed_documents(doc_texts)
+        doc_ids = [doc.id for doc, _ in docs_with_scores]
+        doc_embeddings = self._fetch_embeddings_by_ids(doc_ids)
+
+        if not doc_embeddings or any(len(e) == 0 for e in doc_embeddings):
+            doc_texts = [doc.page_content for doc, _ in docs_with_scores]
+            doc_embeddings = self._embedding.embed_documents(doc_texts)
 
         selected_indices = self._maximal_marginal_relevance(
             query_embedding=embedding,
@@ -2494,14 +2581,17 @@ class PolarDBXVectorStore(VectorStore):
         if not docs_with_scores:
             return []
 
-        doc_texts = [doc.page_content for doc, _ in docs_with_scores]
+        doc_ids = [doc.id for doc, _ in docs_with_scores]
+        doc_embeddings = await self._afetch_embeddings_by_ids(doc_ids)
 
-        if hasattr(self._embedding, "aembed_documents"):
-            doc_embeddings = await self._embedding.aembed_documents(doc_texts)
-        else:
-            doc_embeddings = await run_in_executor(
-                None, self._embedding.embed_documents, doc_texts
-            )
+        if not doc_embeddings or any(len(e) == 0 for e in doc_embeddings):
+            doc_texts = [doc.page_content for doc, _ in docs_with_scores]
+            if hasattr(self._embedding, "aembed_documents"):
+                doc_embeddings = await self._embedding.aembed_documents(doc_texts)
+            else:
+                doc_embeddings = await run_in_executor(
+                    None, self._embedding.embed_documents, doc_texts
+                )
 
         selected_indices = self._maximal_marginal_relevance(
             query_embedding=embedding,
@@ -2603,9 +2693,15 @@ class PolarDBXVectorStore(VectorStore):
 
     async def aclear(self) -> None:
         """Async clear all data from the table."""
-        async with self._aget_cursor() as cursor:
-            await cursor.execute(f"TRUNCATE TABLE `{self._table_name}`")
-        logger.info("Cleared all data from table %s", self._table_name)
+        try:
+            async with self._aget_cursor() as cursor:
+                await cursor.execute(f"TRUNCATE TABLE `{self._table_name}`")
+            logger.info("Cleared all data from table %s", self._table_name)
+        except Exception as e:
+            if "1146" in str(e) or "doesn't exist" in str(e).lower():
+                logger.debug("Table %s does not exist, skipping clear", self._table_name)
+            else:
+                raise
 
     def count(self) -> int:
         """Get the number of vectors in the table."""
@@ -2621,10 +2717,15 @@ class PolarDBXVectorStore(VectorStore):
 
     async def acount(self) -> int:
         """Async get the number of vectors in the table."""
-        async with self._aget_cursor() as cursor:
-            await cursor.execute(f"SELECT COUNT(*) as count FROM `{self._table_name}`")
-            result = await cursor.fetchone()
-            return result["count"] if result else 0
+        try:
+            async with self._aget_cursor() as cursor:
+                await cursor.execute(f"SELECT COUNT(*) as count FROM `{self._table_name}`")
+                result = await cursor.fetchone()
+                return result["count"] if result else 0
+        except Exception as e:
+            if "1146" in str(e) or "doesn't exist" in str(e).lower():
+                return 0
+            raise
 
     def search_by_metadata(
         self,
@@ -2669,22 +2770,27 @@ class PolarDBXVectorStore(VectorStore):
 
         params.append(limit)
 
-        with self._get_cursor() as cursor:
-            cursor.execute(sql, params)
+        try:
+            with self._get_cursor() as cursor:
+                cursor.execute(sql, params)
 
-            documents = []
-            for record in cursor:
-                metadata = record["metadata"]
-                if isinstance(metadata, str):
-                    metadata = json.loads(metadata)
+                documents = []
+                for record in cursor:
+                    metadata = record["metadata"]
+                    if isinstance(metadata, str):
+                        metadata = json.loads(metadata)
 
-                documents.append(
-                    Document(
-                        id=record["id"],
-                        page_content=record["text"],
-                        metadata=metadata or {},
+                    documents.append(
+                        Document(
+                            id=record["id"],
+                            page_content=record["text"],
+                            metadata=metadata or {},
+                        )
                     )
-                )
+        except Exception as e:
+            if "1146" in str(e) or "doesn't exist" in str(e).lower():
+                return []
+            raise
 
         return documents
 

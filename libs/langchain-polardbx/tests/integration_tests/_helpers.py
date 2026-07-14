@@ -1,15 +1,13 @@
 """Shared test helpers for LangChain PolarDBXVectorStore tests."""
 
-import os
 import hashlib
+import os
 from urllib.parse import urlparse
 
 import numpy as np
-from langchain_core.documents import Document
 from langchain_core.embeddings import Embeddings
 
 from langchain_polardbx import PolarDBXVectorStore
-
 
 # ---- .env loading (search upward from this file) ----
 
