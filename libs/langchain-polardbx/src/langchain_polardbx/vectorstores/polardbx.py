@@ -566,9 +566,9 @@ class PolarDBXVectorStore(VectorStore):
             except Exception as e:
                 if "FUNCTION" in str(e) and "VEC_FROMTEXT" in str(e):
                     raise ValueError(
-                        "PolarDB-X 向量函数不可用。"
-                        "请检查 DN 版本是否 >= 20260605，"
-                        "并确认向量索引功能已开启。"
+                        "PolarDB-X vector functions are not available. "
+                        "Please verify the DN version is >= 20260605 "
+                        "and vector index support is enabled."
                     ) from e
                 raise
 
