@@ -273,7 +273,11 @@ def test_inner_product():
     On old versions, initialization should raise NotSupportedError."""
     from _helpers import NotSupportedError
 
-    if is_v3(make_store()):
+    probe = make_store()
+    v3 = is_v3(probe)
+    probe.close()
+
+    if v3:
         # v3: inner_product should work end-to-end
         vs = make_store(table_name="test_lc_innerprod", distance_strategy="inner_product")
         vs.add_texts(TEXTS, metadatas=METADATAS)

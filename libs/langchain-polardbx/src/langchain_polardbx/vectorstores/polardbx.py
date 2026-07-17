@@ -78,7 +78,7 @@ CREATE TABLE IF NOT EXISTS `{table_name}` (
     embedding VECTOR({dimension}) NOT NULL,
     VECTOR INDEX (embedding) M={hnsw_m}{index_extra} DISTANCE={distance_function}
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
-PARTITION BY {partition_by} PARTITIONS {partitions}
+PARTITION BY {partition_by}(id) PARTITIONS {partitions}
 """
 
 SQL_INSERT = """
@@ -219,7 +219,7 @@ class PolarDBXVectorStore(VectorStore):
         self._port = port
         self._user = user
         self._password = password
-        self._database = database
+        self._database = self._validate_identifier(database, "database name")
         self._embedding = embedding
         self._table_name = self._validate_table_name(table_name)
         self._distance_strategy = distance_strategy.lower()
@@ -301,6 +301,20 @@ class PolarDBXVectorStore(VectorStore):
                 "distance_strategy='inner_product' requires PolarDB-X v3 "
                 "with VEC_DISTANCE_INNER_PRODUCT support. "
                 "Use 'cosine' or 'euclidean' for old versions."
+            )
+
+        # Validate partition_by is not supported on v3 instances
+        # (v3 does not support vector indexes on partitioned tables)
+        if (
+            self._partition_by
+            and self._capabilities.get("vec_distance", False)
+        ):
+            self.close()
+            raise NotSupportedError(
+                "partition_by is not supported on PolarDB-X v3 instances "
+                "because v3 does not support vector indexes on partitioned "
+                "tables. Omit the partition_by parameter to create a "
+                "non-partitioned table."
             )
 
         # Handle table creation
@@ -531,19 +545,20 @@ class PolarDBXVectorStore(VectorStore):
 
             for attempt in range(self._connection_retries):
                 try:
-                    self._async_pool = await aiomysql.create_pool(
-                        host=self._host,
-                        port=self._port,
-                        user=self._user,
-                        password=self._password,
-                        db=self._database,
-                        charset="utf8mb4",
-                        autocommit=True,
-                        minsize=1,
-                        maxsize=self._pool_size,
-                        connect_timeout=30,
-                        **self._conn_kwargs,
-                    )
+                    async_config = {
+                        "host": self._host,
+                        "port": self._port,
+                        "user": self._user,
+                        "password": self._password,
+                        "db": self._database,
+                        "charset": "utf8mb4",
+                        "autocommit": True,
+                        "minsize": 1,
+                        "maxsize": self._pool_size,
+                        "connect_timeout": 30,
+                    }
+                    async_config.update(self._conn_kwargs)
+                    self._async_pool = await aiomysql.create_pool(**async_config)
                     return self._async_pool
                 except Exception as e:
                     last_exception = e
@@ -1263,7 +1278,9 @@ class PolarDBXVectorStore(VectorStore):
         elif self._distance_strategy == "inner_product":
             # VEC_DISTANCE_INNER_PRODUCT returns negative dot product
             # (smaller distance = larger dot product = more similar)
-            return max(0.0, -distance)
+            if distance < 0:
+                return 1.0
+            return max(0.0, 1.0 - distance)
         else:
             # For euclidean distance [0, inf): similarity = 1 / (1 + distance)
             return 1.0 / (1.0 + distance)
@@ -1295,7 +1312,8 @@ class PolarDBXVectorStore(VectorStore):
             sample_vec = self._vector_to_string(embeddings[0])
             with self._get_cursor() as cursor:
                 cursor.execute(
-                    f"SELECT VECTOR_DIM(VEC_FROMTEXT('{sample_vec}')) AS dim"
+                    "SELECT VECTOR_DIM(VEC_FROMTEXT(%s)) AS dim",
+                    (sample_vec,)
                 )
                 row = cursor.fetchone()
                 if row and row.get("dim") != expected:
@@ -1518,6 +1536,18 @@ class PolarDBXVectorStore(VectorStore):
         # Prepare metadatas
         if metadatas is None:
             metadatas = [{} for _ in texts_list]
+
+        # Validate lengths
+        if len(texts_list) != len(metadatas):
+            raise ValueError(
+                f"Number of texts ({len(texts_list)}) must match "
+                f"number of metadatas ({len(metadatas)})"
+            )
+        if len(texts_list) != len(ids):
+            raise ValueError(
+                f"Number of texts ({len(texts_list)}) must match "
+                f"number of ids ({len(ids)})"
+            )
 
         # Insert in batches (executemany uses prepared statements internally)
         with self._get_cursor() as cursor:

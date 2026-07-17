@@ -36,7 +36,7 @@ results = vectorstore.similarity_search("Hello", k=2)
 ## Features
 
 - Native PolarDB-X VECTOR data type and HNSW index support
-- Cosine and Euclidean distance metrics
+- Cosine, Euclidean, and Inner Product distance metrics
 - Dynamic vector index management (create/drop at runtime)
 - ef_search tuning per query
 - ANN/KNN search mode switching
