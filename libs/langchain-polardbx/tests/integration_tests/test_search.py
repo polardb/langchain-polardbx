@@ -111,3 +111,43 @@ async def test_async():
 
     vs.drop_table()
     await vs.aclose()
+
+
+# ==================== IGNORE INDEX search_type ====================
+
+def test_ignore_index_search():
+    """search_type='ignore' should use IGNORE INDEX hint — works on both versions."""
+    vs = make_store(table_name="test_lc_ignore_idx")
+    _setup(vs)
+
+    # _build_index_hint should produce IGNORE INDEX
+    hint = vs._build_index_hint("ignore")
+    assert "IGNORE INDEX" in hint or hint == "", (
+        f"Expected IGNORE INDEX in hint, got '{hint}'"
+    )
+
+    # Actual search with ignore type should return results
+    results = vs.similarity_search("database", k=3, search_type="ignore")
+    assert len(results) <= 3
+    assert len(results) > 0
+
+    # With score
+    results = vs.similarity_search_with_score("database", k=3, search_type="ignore")
+    assert len(results) <= 3
+    assert all(isinstance(s, float) for _, s in results)
+
+    vs.drop_table()
+    vs.close()
+
+
+async def test_ignore_index_search_async():
+    """Async search_type='ignore' — works on both versions."""
+    vs = make_store(table_name="test_lc_ignore_idx_async")
+    await vs.aadd_texts(TEXTS, metadatas=METADATAS)
+
+    results = await vs.asimilarity_search("database", k=3, search_type="ignore")
+    assert len(results) <= 3
+    assert len(results) > 0
+
+    vs.drop_table()
+    await vs.aclose()

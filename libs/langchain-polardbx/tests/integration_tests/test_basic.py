@@ -169,3 +169,65 @@ async def test_async():
     # aclose
     vs4 = make_store()
     await vs4.aclose()
+
+
+# ==================== BULK UPSERT (sync) ====================
+
+def test_bulk_upsert():
+    """bulk_upsert with pre-computed embeddings — works on both v3 and old."""
+    vs = make_store(table_name="test_lc_bulkupsert")
+
+    texts = ["bulk text 1", "bulk text 2", "bulk text 3"]
+    embeddings = EMB.embed_documents(texts)
+
+    ids = vs.bulk_upsert(texts=texts, embeddings=embeddings)
+    assert len(ids) == 3
+    assert vs.count() == 3
+
+    # Search should work
+    results = vs.similarity_search("bulk", k=2)
+    assert len(results) > 0
+
+    # Upsert with same IDs should update, not duplicate
+    new_texts = ["updated bulk 1", "updated bulk 2", "updated bulk 3"]
+    new_embeddings = EMB.embed_documents(new_texts)
+    vs.bulk_upsert(texts=new_texts, embeddings=new_embeddings, ids=ids)
+    assert vs.count() == 3  # still 3, not 6
+
+    # With metadata
+    texts2 = ["meta bulk 1", "meta bulk 2"]
+    embs2 = EMB.embed_documents(texts2)
+    metas = [{"category": "bulk"}, {"category": "bulk"}]
+    ids2 = vs.bulk_upsert(texts=texts2, embeddings=embs2, metadatas=metas)
+    assert len(ids2) == 2
+    assert vs.count() == 5
+
+    vs.drop_table()
+    vs.close()
+
+
+# ==================== BULK UPSERT (async) ====================
+
+async def test_abulk_upsert():
+    """abulk_upsert with pre-computed embeddings — works on both v3 and old."""
+    vs = make_store(table_name="test_lc_abulkupsert")
+
+    texts = ["async bulk 1", "async bulk 2"]
+    embeddings = EMB.embed_documents(texts)
+
+    ids = await vs.abulk_upsert(texts=texts, embeddings=embeddings)
+    assert len(ids) == 2
+    assert vs.count() == 2
+
+    # Search should work
+    results = await vs.asimilarity_search("async bulk", k=1)
+    assert len(results) == 1
+
+    # Upsert with explicit IDs
+    new_texts = ["updated async 1", "updated async 2"]
+    new_embs = EMB.embed_documents(new_texts)
+    await vs.abulk_upsert(texts=new_texts, embeddings=new_embs, ids=ids)
+    assert vs.count() == 2  # still 2
+
+    vs.drop_table()
+    await vs.aclose()

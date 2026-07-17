@@ -5,7 +5,7 @@ import sys
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
-from _helpers import EMB, METADATAS, TEXTS, make_store
+from _helpers import EMB, METADATAS, TEXTS, is_v3, make_store
 
 
 def _drop_existing_vi(vs):
@@ -219,3 +219,164 @@ def test_apply_vector_index_variants():
     vs.drop_vector_index(index_name="vi_m32")
     vs.drop_table()
     vs.close()
+
+
+# ==================== v3: EF_CONSTRUCTION in CREATE TABLE DDL ====================
+
+def test_ef_construction_in_ddl():
+    """ef_construction parameter should appear in CREATE TABLE DDL on v3,
+    and be silently ignored on old versions."""
+    vs = make_store(table_name="test_lc_idx_efcddl", ef_construction=40)
+    vs.add_texts(TEXTS[:2], metadatas=METADATAS[:2])
+
+    if is_v3(vs):
+        # v3: DDL should contain EF_CONSTRUCTION=40
+        with vs._get_cursor() as cursor:
+            cursor.execute("SHOW CREATE TABLE `test_lc_idx_efcddl`")
+            row = cursor.fetchone()
+            create_sql = row.get("Create Table", "") if row else ""
+        assert "EF_CONSTRUCTION=40" in create_sql.upper(), (
+            f"EF_CONSTRUCTION=40 not found in DDL: {create_sql[-120:]}"
+        )
+    else:
+        # Old version: ef_construction silently ignored, table still works
+        assert vs.count() == 2
+
+    vs.drop_table()
+    vs.close()
+
+
+# ==================== v3: EF_CONSTRUCTION in apply_vector_index ====================
+
+def test_apply_vector_index_with_ef_construction():
+    """apply_vector_index should accept ef_construction on v3,
+    and silently ignore it on old versions."""
+    vs = make_store(table_name="test_lc_idx_efcapply")
+    vs.add_texts(TEXTS[:2], metadatas=METADATAS[:2])
+    _drop_existing_vi(vs)
+
+    if is_v3(vs):
+        vs.apply_vector_index(index_name="vi_efc", m=8, ef_construction=64)
+        detected = vs._detect_vector_index_name()
+        assert detected == "vi_efc"
+    else:
+        # Old version: ef_construction ignored, index still created
+        vs.apply_vector_index(index_name="vi_efc", m=8)
+        detected = vs._detect_vector_index_name()
+        assert detected == "vi_efc"
+
+    vs.drop_vector_index(index_name="vi_efc")
+    vs.drop_table()
+    vs.close()
+
+
+# ==================== v3: VECTOR_INDEXES view for index detection ====================
+
+def test_detect_vector_index_name():
+    """_detect_vector_index_name should find the index via VECTOR_INDEXES
+    view on v3, or via SHOW CREATE TABLE regex on old versions."""
+    vs = make_store(table_name="test_lc_idx_detect")
+    vs.add_texts(TEXTS[:1], metadatas=METADATAS[:1])
+
+    # Table was created with a default VECTOR INDEX — should be detectable
+    vs._vector_index_name = None  # force re-detection
+    detected = vs._detect_vector_index_name()
+    assert detected is not None, "Should detect default vector index"
+
+    vs.drop_table()
+    vs.close()
+
+
+# ==================== v3: preload_index / preload_check ====================
+
+def test_preload_index():
+    """preload_index should succeed on v3, raise NotSupportedError on old."""
+    from _helpers import NotSupportedError
+
+    vs = make_store(table_name="test_lc_idx_preload")
+    vs.add_texts(TEXTS[:1], metadatas=METADATAS[:1])
+
+    if is_v3(vs):
+        vs.preload_index()  # should not raise
+    else:
+        try:
+            vs.preload_index()
+            assert False, "Expected NotSupportedError on old version"
+        except NotSupportedError:
+            pass  # expected
+
+    vs.drop_table()
+    vs.close()
+
+
+def test_preload_check():
+    """preload_check should return a dict on v3, raise NotSupportedError on old."""
+    from _helpers import NotSupportedError
+
+    vs = make_store(table_name="test_lc_idx_plchk")
+    vs.add_texts(TEXTS[:1], metadatas=METADATAS[:1])
+
+    if is_v3(vs):
+        result = vs.preload_check()
+        assert isinstance(result, dict)
+    else:
+        try:
+            vs.preload_check()
+            assert False, "Expected NotSupportedError on old version"
+        except NotSupportedError:
+            pass  # expected
+
+    vs.drop_table()
+    vs.close()
+
+
+# ==================== v3: explain_index_health ====================
+
+def test_explain_index_health():
+    """explain_index_health should return metadata on v3, raise NotSupportedError on old."""
+    from _helpers import NotSupportedError
+
+    vs = make_store(table_name="test_lc_idx_health")
+    vs.add_texts(TEXTS[:1], metadatas=METADATAS[:1])
+
+    if is_v3(vs):
+        result = vs.explain_index_health()
+        assert "index_info" in result
+        assert "explain" in result
+        assert result["index_info"] is not None
+    else:
+        try:
+            vs.explain_index_health()
+            assert False, "Expected NotSupportedError on old version"
+        except NotSupportedError:
+            pass  # expected
+
+    vs.drop_table()
+    vs.close()
+
+
+# ==================== v3: async preload / explain_index_health ====================
+
+async def test_async_preload_and_health():
+    """Async preload_index/preload_check/explain_index_health on v3,
+    NotSupportedError on old."""
+    from _helpers import NotSupportedError
+
+    vs = make_store(table_name="test_lc_idx_asyncv3")
+    await vs.aadd_texts(TEXTS[:1], metadatas=METADATAS[:1])
+
+    if is_v3(vs):
+        await vs.apreload_index()  # should not raise
+        result = await vs.apreload_check()
+        assert isinstance(result, dict)
+        health = await vs.aexplain_index_health()
+        assert "index_info" in health
+    else:
+        try:
+            await vs.apreload_index()
+            assert False, "Expected NotSupportedError on old version"
+        except NotSupportedError:
+            pass
+
+    vs.drop_table()
+    await vs.aclose()

@@ -39,6 +39,13 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
+
+class NotSupportedError(NotImplementedError):
+    """Raised when a feature is not supported by the current PolarDB-X version."""
+
+    pass
+
+
 # Supported filter operators for dict-style filters
 FILTER_OPERATORS = {
     "$eq": "=",
@@ -59,8 +66,19 @@ CREATE TABLE IF NOT EXISTS `{table_name}` (
     text LONGTEXT NOT NULL,
     metadata JSON,
     embedding VECTOR({dimension}) NOT NULL,
-    VECTOR INDEX (embedding) M={hnsw_m} DISTANCE={distance_function}
-) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+    VECTOR INDEX (embedding) M={hnsw_m}{index_extra} DISTANCE={distance_function}
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
+"""
+
+SQL_CREATE_TABLE_PARTITIONED = """
+CREATE TABLE IF NOT EXISTS `{table_name}` (
+    id VARCHAR(36) PRIMARY KEY,
+    text LONGTEXT NOT NULL,
+    metadata JSON,
+    embedding VECTOR({dimension}) NOT NULL,
+    VECTOR INDEX (embedding) M={hnsw_m}{index_extra} DISTANCE={distance_function}
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
+PARTITION BY {partition_by} PARTITIONS {partitions}
 """
 
 SQL_INSERT = """
@@ -139,15 +157,18 @@ class PolarDBXVectorStore(VectorStore):
         database: str,
         embedding: Embeddings,
         table_name: str = "polardbx_vectors",
-        distance_strategy: Literal["cosine", "euclidean"] = "cosine",
+        distance_strategy: Literal["cosine", "euclidean", "inner_product"] = "cosine",
         hnsw_m: int = 6,
         pool_size: int = 5,
         pre_delete_table: bool = False,
         *,
         embedding_dimension: Optional[int] = None,
+        ef_construction: Optional[int] = None,
         connection_retries: int = 3,
         retry_delay: float = 1.0,
         vector_index_name: Optional[str] = None,
+        partition_by: Optional[str] = None,
+        partitions: int = 0,
         **kwargs: Any,
     ) -> None:
         """Initialize the PolarDB-X vector store.
@@ -161,8 +182,9 @@ class PolarDBXVectorStore(VectorStore):
             embedding: The embedding model to use.
             table_name: The name of the table to store vectors. Defaults to
                 "polardbx_vectors".
-            distance_strategy: Distance function for vector search. Either "cosine"
-                or "euclidean". Defaults to "cosine".
+            distance_strategy: Distance function for vector search. One of
+                "cosine", "euclidean", or "inner_product" (v3 only).
+                Defaults to "cosine".
             hnsw_m: M parameter for HNSW index (3-200). Higher values = more accurate
                 but slower indexing. Defaults to 6.
             pool_size: Connection pool size. Defaults to 5.
@@ -170,10 +192,17 @@ class PolarDBXVectorStore(VectorStore):
                 Defaults to False.
             embedding_dimension: Embedding dimension. If not provided, will be
                 inferred from the embedding model.
+            ef_construction: HNSW build-time candidate list size (5-1000, v3 only).
+                Larger values improve index quality at the cost of slower builds.
+                Ignored on old versions. Defaults to None.
             connection_retries: Number of connection retry attempts. Defaults to 3.
             retry_delay: Delay between retry attempts in seconds. Defaults to 1.0.
             vector_index_name: Name of the vector index for FORCE INDEX hints.
                 If None, auto-detected on first use. Defaults to None.
+            partition_by: Partition strategy for the table (e.g. "HASH", "KEY").
+                If None, creates a single-partition table. Defaults to None.
+            partitions: Number of partitions. Only effective when partition_by
+                is set. Defaults to 0.
             **kwargs: Additional connection arguments passed to both sync and
                 async connection pools (e.g. ssl_ca, ssl_cert, ssl_key,
                 ssl_disabled for SSL/TLS encryption).
@@ -200,13 +229,35 @@ class PolarDBXVectorStore(VectorStore):
         self._connection_retries = connection_retries
         self._retry_delay = retry_delay
         self._vector_index_name = vector_index_name
+        self._partition_by = partition_by.upper() if partition_by else None
+        self._partitions = partitions
+        self._ef_construction = ef_construction
         self._conn_kwargs = kwargs  # Extra connection args (e.g. SSL params)
 
+        # Capabilities detected at init time (filled by _detect_capabilities)
+        self._capabilities: Dict[str, bool] = {}
+
         # Validate distance strategy
-        if self._distance_strategy not in ("cosine", "euclidean"):
+        if self._distance_strategy not in (
+            "cosine", "euclidean", "inner_product"
+        ):
             raise ValueError(
                 f"Invalid distance_strategy: {distance_strategy}. "
-                "Must be 'cosine' or 'euclidean'."
+                "Must be 'cosine', 'euclidean', or 'inner_product'."
+            )
+
+        # Validate inner_product requires v3 capability
+        # (checked after _detect_capabilities, just store for now)
+
+        # Validate partition params
+        if self._partition_by and self._partition_by not in ("HASH", "KEY"):
+            raise ValueError(
+                f"Invalid partition_by: {partition_by}. "
+                "Must be 'HASH' or 'KEY'."
+            )
+        if self._partition_by and self._partitions <= 0:
+            raise ValueError(
+                "partitions must be > 0 when partition_by is specified."
             )
 
         # Create connection pool
@@ -232,12 +283,25 @@ class PolarDBXVectorStore(VectorStore):
         self._async_pool: Optional[Any] = None
         self._async_pool_lock = asyncio.Lock()
 
-        # Check vector support — close pool on failure to avoid resource leak
+        # Detect capabilities and check vector support
+        # — close pool on failure to avoid resource leak
         try:
-            self._check_vector_support()
+            self._detect_capabilities()
         except Exception:
             self.close()
             raise
+
+        # Validate inner_product requires v3 distance functions
+        if (
+            self._distance_strategy == "inner_product"
+            and not self._capabilities.get("vec_distance", False)
+        ):
+            self.close()
+            raise NotSupportedError(
+                "distance_strategy='inner_product' requires PolarDB-X v3 "
+                "with VEC_DISTANCE_INNER_PRODUCT support. "
+                "Use 'cosine' or 'euclidean' for old versions."
+            )
 
         # Handle table creation
         if pre_delete_table:
@@ -254,10 +318,12 @@ class PolarDBXVectorStore(VectorStore):
             return self._cosine_relevance_score_fn
         elif self._distance_strategy == "euclidean":
             return self._euclidean_relevance_score_fn
+        elif self._distance_strategy == "inner_product":
+            return self._inner_product_relevance_score_fn
         else:
             raise ValueError(
                 f"Unsupported distance strategy: {self._distance_strategy}. "
-                "Must be 'cosine' or 'euclidean'."
+                "Must be 'cosine', 'euclidean', or 'inner_product'."
             )
 
     @staticmethod
@@ -269,6 +335,17 @@ class PolarDBXVectorStore(VectorStore):
     def _euclidean_relevance_score_fn(distance: float) -> float:
         """Convert euclidean distance to relevance score (0-1)."""
         return 1.0 / (1.0 + distance)
+
+    @staticmethod
+    def _inner_product_relevance_score_fn(distance: float) -> float:
+        """Convert inner-product distance to relevance score (0-1).
+
+        VEC_DISTANCE_INNER_PRODUCT returns the *negative* dot product
+        (smaller distance = larger dot product = more similar).
+        """
+        if distance < 0:
+            return 1.0
+        return max(0.0, 1.0 - distance)
 
     @staticmethod
     def _validate_table_name(table_name: str) -> str:
@@ -546,8 +623,23 @@ class PolarDBXVectorStore(VectorStore):
         finally:
             pool.release(conn)
 
-    def _check_vector_support(self) -> None:
-        """Check if PolarDB-X vector index is enabled."""
+    def _detect_capabilities(self) -> None:
+        """Detect PolarDB-X vector capabilities and check vector support.
+
+        Probes the database for vector feature availability and caches
+        results in ``self._capabilities`` for later use by conditional
+        code paths.
+
+        Detected capabilities:
+            - vec_distance: VEC_DISTANCE() function (DN pushdown with HNSW)
+            - vec_totext: VEC_TOTEXT() function
+            - vec_dim: VECTOR_DIM() function
+            - vector_indexes_view: information_schema.VECTOR_INDEXES view
+
+        Raises:
+            ValueError: If vector index is disabled or vector functions
+                are not available.
+        """
         with self._get_cursor() as cursor:
             try:
                 # Check if vector index is disabled via system variable
@@ -582,10 +674,181 @@ class PolarDBXVectorStore(VectorStore):
                     ) from e
                 raise
 
+        # Probe extended capabilities (non-fatal — default to False)
+        # VEC_DISTANCE needs special handling: on DN the function exists
+        # but errors without a vector-index context, so we inspect the
+        # error message to distinguish "exists" from "not found".
+        caps = {
+            "vec_distance": self._probe_vec_distance(),
+            "vec_totext": self._probe_function(
+                None,
+                "SELECT VEC_TOTEXT(VEC_FROMTEXT('[1,2,3]'))"
+                " IS NOT NULL",
+            ),
+            "vec_dim": self._probe_function(
+                None,
+                "SELECT VECTOR_DIM(VEC_FROMTEXT('[1,2,3]'))"
+                " IS NOT NULL",
+            ),
+        }
+        caps["vector_indexes_view"] = self._probe_table_exists(
+            "information_schema", "VECTOR_INDEXES"
+        )
+        self._capabilities = caps
+        logger.info("Detected capabilities: %s", self._capabilities)
+
+    def _probe_vec_distance(self) -> bool:
+        """Probe whether VEC_DISTANCE() is available.
+
+        VEC_DISTANCE requires a vector-index context to infer the distance
+        metric, so a standalone ``SELECT VEC_DISTANCE(...)`` fails on DN
+        even though the function exists.  We inspect the error message to
+        tell apart "function exists but needs index" from "function not
+        found".
+
+        Returns:
+            True if the function is available, False otherwise.
+        """
+        sql = (
+            "SELECT VEC_DISTANCE(VEC_FROMTEXT('[1,2,3]'),"
+            " VEC_FROMTEXT('[1,2,3]')) IS NOT NULL"
+        )
+        try:
+            with self._get_cursor() as cursor:
+                cursor.execute(sql)
+                return cursor.fetchone() is not None
+        except Exception as e:
+            err_msg = str(e).upper()
+            # Function exists but needs a vector index to determine distance type
+            if "NO VECTOR INDEX" in err_msg or "CANNOT DETERMINE" in err_msg:
+                logger.debug(
+                    "VEC_DISTANCE exists but needs index context: %s", e
+                )
+                return True
+            logger.debug("VEC_DISTANCE probe failed: %s", e)
+            return False
+
+    def _probe_function(self, cursor_fn: Any, sql: str) -> bool:
+        """Probe whether a SQL function is available.
+
+        Args:
+            cursor_fn: Unused (kept for API compatibility).
+            sql: The SQL statement to test.
+
+        Returns:
+            True if the function is available, False otherwise.
+        """
+        try:
+            with self._get_cursor() as cursor:
+                cursor.execute(sql)
+                return cursor.fetchone() is not None
+        except Exception as e:
+            logger.debug("Function probe failed [%s]: %s", sql, e)
+            return False
+
+    def _probe_table_exists(self, schema: str, table: str) -> bool:
+        """Check if a table/view exists in information_schema.
+
+        Args:
+            schema: The schema name.
+            table: The table/view name.
+
+        Returns:
+            True if the table/view exists, False otherwise.
+        """
+        try:
+            with self._get_cursor() as cursor:
+                cursor.execute(
+                    "SELECT COUNT(*) AS cnt FROM information_schema.tables "
+                    "WHERE table_schema = %s AND table_name = %s",
+                    (schema, table),
+                )
+                result = cursor.fetchone()
+                return result["cnt"] > 0 if result else False
+        except Exception as e:
+            logger.debug("Table probe failed [%s.%s]: %s", schema, table, e)
+            return False
+
+    def _get_distance_func(self) -> str:
+        """Return the optimal distance function for the current instance.
+
+        Prefers ``VEC_DISTANCE`` (DN pushdown, HNSW accelerated) when
+        available; falls back to explicit ``VEC_DISTANCE_COSINE`` or
+        ``VEC_DISTANCE_EUCLIDEAN`` otherwise.
+
+        Returns:
+            The distance function name to use in SQL.
+        """
+        if self._capabilities.get("vec_distance", False):
+            return "VEC_DISTANCE"
+        if self._distance_strategy == "cosine":
+            return "VEC_DISTANCE_COSINE"
+        if self._distance_strategy == "inner_product":
+            return "VEC_DISTANCE_INNER_PRODUCT"
+        return "VEC_DISTANCE_EUCLIDEAN"
+
+    def _build_create_table_sql(self, dimension: int) -> str:
+        """Build the CREATE TABLE SQL with optional partition clause.
+
+        Args:
+            dimension: The vector embedding dimension.
+
+        Returns:
+            The complete CREATE TABLE SQL statement.
+        """
+        # Build optional EF_CONSTRUCTION clause (v3 only)
+        index_extra = ""
+        if (
+            self._ef_construction is not None
+            and self._capabilities.get("vec_distance", False)
+        ):
+            index_extra = f" EF_CONSTRUCTION={self._ef_construction}"
+
+        base_params = {
+            "table_name": self._table_name,
+            "dimension": dimension,
+            "hnsw_m": self._hnsw_m,
+            "distance_function": self._distance_strategy.upper(),
+            "index_extra": index_extra,
+        }
+        if self._partition_by and self._partitions > 0:
+            return SQL_CREATE_TABLE_PARTITIONED.format(
+                **base_params,
+                partition_by=self._partition_by,
+                partitions=self._partitions,
+            )
+        return SQL_CREATE_TABLE.format(**base_params)
+
     def _detect_vector_index_name(self) -> Optional[str]:
-        """Auto-detect the vector index name from SHOW CREATE TABLE."""
+        """Auto-detect the vector index name.
+
+        On v3 instances, queries ``information_schema.VECTOR_INDEXES``
+        for the index name.  Falls back to ``SHOW CREATE TABLE`` +
+        regex parsing on older versions.
+        """
         if self._vector_index_name is not None:
             return self._vector_index_name
+
+        # v3: use information_schema.VECTOR_INDEXES view (preferred)
+        if self._capabilities.get("vector_indexes_view", False):
+            try:
+                with self._get_cursor() as cursor:
+                    cursor.execute(
+                        "SELECT INDEX_NAME FROM information_schema.VECTOR_INDEXES "
+                        "WHERE TABLE_SCHEMA = %s AND TABLE_NAME = %s "
+                        "LIMIT 1",
+                        (self._database, self._table_name),
+                    )
+                    row = cursor.fetchone()
+                    if row:
+                        name = row.get("INDEX_NAME", row.get("index_name", ""))
+                        if name:
+                            self._vector_index_name = name
+                            return self._vector_index_name
+            except Exception as e:
+                logger.debug("VECTOR_INDEXES query failed: %s", e)
+
+        # Fallback: parse SHOW CREATE TABLE with regex
         try:
             with self._get_cursor() as cursor:
                 cursor.execute(f"SHOW CREATE TABLE `{self._table_name}`")
@@ -609,18 +872,26 @@ class PolarDBXVectorStore(VectorStore):
     def _build_index_hint(self, search_type: Optional[str]) -> str:
         """Build index hint string for search_type.
 
-        - knn: USE INDEX() to force full table scan (brute force)
+        - knn: FORCE INDEX(PRIMARY) to force full table scan (brute force)
         - ann: FORCE INDEX(vector_index) to force vector index usage
         - auto/None: no hint, let optimizer decide
         """
         if search_type is None or search_type == "auto":
             return ""
         if search_type == "knn":
-            return " USE INDEX()"
+            # FORCE INDEX(PRIMARY) works on both old and new versions
+            # to bypass the vector index and force a full scan
+            return " FORCE INDEX(PRIMARY)"
         if search_type == "ann":
             idx_name = self._detect_vector_index_name()
             if idx_name:
                 return f" FORCE INDEX(`{idx_name}`)"
+            return ""
+        if search_type == "ignore":
+            # IGNORE INDEX forces the optimizer to skip the vector index
+            idx_name = self._detect_vector_index_name()
+            if idx_name:
+                return f" IGNORE INDEX(`{idx_name}`)"
             return ""
         return ""
 
@@ -636,27 +907,37 @@ class PolarDBXVectorStore(VectorStore):
         index_name: str = "vi",
         m: Optional[int] = None,
         distance: Optional[str] = None,
+        ef_construction: Optional[int] = None,
     ) -> None:
         """Create a vector index on the embedding column dynamically.
 
         Args:
             index_name: Name for the vector index. Defaults to "vi".
             m: HNSW M parameter (3-200). Defaults to the store's hnsw_m.
-            distance: Distance function ("COSINE" or "EUCLIDEAN").
-                Defaults to the store's distance_strategy.
+            distance: Distance function ("COSINE", "EUCLIDEAN", or
+                "INNER_PRODUCT"). Defaults to the store's distance_strategy.
+            ef_construction: HNSW build-time candidate list size (5-1000).
+                v3 only; silently ignored on old versions.
+                Defaults to the store's ef_construction if set.
         """
         self._validate_identifier(index_name, "index name")
         m_val = m or self._hnsw_m
         dist_val = (distance or self._distance_strategy).upper()
-        if dist_val not in ("COSINE", "EUCLIDEAN"):
+        if dist_val not in ("COSINE", "EUCLIDEAN", "INNER_PRODUCT"):
             raise ValueError(
-                f"Invalid distance function: {dist_val}. Must be 'COSINE' or 'EUCLIDEAN'."
+                f"Invalid distance function: {dist_val}. "
+                "Must be 'COSINE', 'EUCLIDEAN', or 'INNER_PRODUCT'."
             )
+        ef_val = ef_construction or self._ef_construction
+        # Build optional EF_CONSTRUCTION clause (v3 only)
+        ef_clause = ""
+        if ef_val is not None and self._capabilities.get("vec_distance", False):
+            ef_clause = f" EF_CONSTRUCTION={ef_val}"
         with self._get_cursor() as cursor:
             cursor.execute(
                 f"ALTER TABLE `{self._table_name}` "
                 f"ADD VECTOR INDEX `{index_name}` (embedding) "
-                f"M={m_val} DISTANCE={dist_val}"
+                f"M={m_val}{ef_clause} DISTANCE={dist_val}"
             )
         self._vector_index_name = index_name
         logger.info("Vector index '%s' created on table %s", index_name, self._table_name)
@@ -706,25 +987,185 @@ class PolarDBXVectorStore(VectorStore):
             await cursor.fetchall()
         logger.info("OPTIMIZE TABLE executed on %s", self._table_name)
 
+    # ---- P2: v3 Enhanced features (raise NotSupportedError on old versions) ----
+
+    def _require_v3(self, feature: str) -> None:
+        """Raise NotSupportedError if v3 capabilities are not available."""
+        if not self._capabilities.get("vec_distance", False):
+            raise NotSupportedError(
+                f"{feature} requires PolarDB-X v3 with vector index support. "
+                "Current instance does not support v3 vector features."
+            )
+
+    def preload_index(self) -> None:
+        """Preload the HNSW vector index into memory cache (v3 only).
+
+        Loads the entire HNSW auxiliary table graph into the shared cache
+        to eliminate cold-start latency on the first query.
+
+        Raises:
+            NotSupportedError: If the instance does not support v3 features.
+        """
+        self._require_v3("preload_index()")
+        with self._get_cursor() as cursor:
+            cursor.execute(
+                f"CALL dbms_vidx.preload('{self._database}', "
+                f"'{self._table_name}', 'embedding')"
+            )
+            cursor.fetchall()
+        logger.info("Preloaded vector index for table %s", self._table_name)
+
+    def preload_check(self) -> Dict[str, Any]:
+        """Check if preloading the vector index would fit in cache (v3 only).
+
+        Estimates the memory required and compares it with
+        ``vidx_hnsw_cache_size`` without actually loading.
+
+        Returns:
+            Dictionary with check results.
+
+        Raises:
+            NotSupportedError: If the instance does not support v3 features.
+        """
+        self._require_v3("preload_check()")
+        with self._get_cursor() as cursor:
+            cursor.execute(
+                f"CALL dbms_vidx.preload_check('{self._database}', "
+                f"'{self._table_name}', 'embedding')"
+            )
+            rows = cursor.fetchall()
+            return {
+                row.get("Message", row.get("message", str(row))): row
+                for row in rows
+            } if rows else {}
+
+    def explain_index_health(self) -> Dict[str, Any]:
+        """Check vector index health and return diagnostics (v3 only).
+
+        Combines ``information_schema.VECTOR_INDEXES`` metadata with
+        ``EXPLAIN`` output to provide a comprehensive health report.
+
+        Returns:
+            Dictionary with index metadata and query plan info.
+
+        Raises:
+            NotSupportedError: If the instance does not support v3 features.
+        """
+        self._require_v3("explain_index_health()")
+        result: Dict[str, Any] = {}
+
+        # 1. Query VECTOR_INDEXES view for index metadata
+        with self._get_cursor() as cursor:
+            cursor.execute(
+                "SELECT INDEX_NAME, ALGORITHM, METRIC_TYPE, "
+                "DIMENSION, M, EF_CONSTRUCTION, QUANTIZE_TYPE "
+                "FROM information_schema.VECTOR_INDEXES "
+                "WHERE TABLE_SCHEMA = %s AND TABLE_NAME = %s",
+                (self._database, self._table_name),
+            )
+            rows = cursor.fetchall()
+            if rows:
+                result["index_info"] = rows[0]
+                # Use actual dimension from VECTOR_INDEXES view
+                dim = rows[0].get("DIMENSION", self._embedding_dimension or 4)
+            else:
+                result["index_info"] = None
+                dim = self._embedding_dimension or 4
+
+            # 2. Run EXPLAIN to check if vector index is used
+            dist_func = self._get_distance_func()
+            sample_vec = self._vector_to_string([0.0] * dim)
+            cursor.execute(
+                f"EXPLAIN SELECT id FROM `{self._table_name}` "
+                f"ORDER BY {dist_func}(embedding, "
+                f"VEC_FROMTEXT('{sample_vec}')) LIMIT 10"
+            )
+            explain_rows = cursor.fetchall()
+            result["explain"] = explain_rows
+
+        return result
+
+    async def apreload_index(self) -> None:
+        """Async preload the HNSW vector index into memory cache (v3 only)."""
+        self._require_v3("apreload_index()")
+        async with self._aget_cursor() as cursor:
+            await cursor.execute(
+                f"CALL dbms_vidx.preload('{self._database}', "
+                f"'{self._table_name}', 'embedding')"
+            )
+            await cursor.fetchall()
+        logger.info("Preloaded vector index for table %s", self._table_name)
+
+    async def apreload_check(self) -> Dict[str, Any]:
+        """Async check if preloading would fit in cache (v3 only)."""
+        self._require_v3("apreload_check()")
+        async with self._aget_cursor() as cursor:
+            await cursor.execute(
+                f"CALL dbms_vidx.preload_check('{self._database}', "
+                f"'{self._table_name}', 'embedding')"
+            )
+            rows = await cursor.fetchall()
+            return {
+                row.get("Message", row.get("message", str(row))): row
+                for row in rows
+            } if rows else {}
+
+    async def aexplain_index_health(self) -> Dict[str, Any]:
+        """Async check vector index health (v3 only)."""
+        self._require_v3("aexplain_index_health()")
+        result: Dict[str, Any] = {}
+        async with self._aget_cursor() as cursor:
+            await cursor.execute(
+                "SELECT INDEX_NAME, ALGORITHM, METRIC_TYPE, "
+                "DIMENSION, M, EF_CONSTRUCTION, QUANTIZE_TYPE "
+                "FROM information_schema.VECTOR_INDEXES "
+                "WHERE TABLE_SCHEMA = %s AND TABLE_NAME = %s",
+                (self._database, self._table_name),
+            )
+            rows = await cursor.fetchall()
+            result["index_info"] = rows[0] if rows else None
+
+            # Use actual dimension from VECTOR_INDEXES view
+            if rows:
+                dim = rows[0].get("DIMENSION", self._embedding_dimension or 4)
+            else:
+                dim = self._embedding_dimension or 4
+
+            dist_func = self._get_distance_func()
+            sample_vec = self._vector_to_string([0.0] * dim)
+            await cursor.execute(
+                f"EXPLAIN SELECT id FROM `{self._table_name}` "
+                f"ORDER BY {dist_func}(embedding, "
+                f"VEC_FROMTEXT('{sample_vec}')) LIMIT 10"
+            )
+            result["explain"] = await cursor.fetchall()
+        return result
+
     async def aapply_vector_index(
         self,
         index_name: str = "vi",
         m: Optional[int] = None,
         distance: Optional[str] = None,
+        ef_construction: Optional[int] = None,
     ) -> None:
         """Async create a vector index on the embedding column."""
         self._validate_identifier(index_name, "index name")
         m_val = m or self._hnsw_m
         dist_val = (distance or self._distance_strategy).upper()
-        if dist_val not in ("COSINE", "EUCLIDEAN"):
+        if dist_val not in ("COSINE", "EUCLIDEAN", "INNER_PRODUCT"):
             raise ValueError(
-                f"Invalid distance function: {dist_val}. Must be 'COSINE' or 'EUCLIDEAN'."
+                f"Invalid distance function: {dist_val}. "
+                "Must be 'COSINE', 'EUCLIDEAN', or 'INNER_PRODUCT'."
             )
+        ef_val = ef_construction or self._ef_construction
+        ef_clause = ""
+        if ef_val is not None and self._capabilities.get("vec_distance", False):
+            ef_clause = f" EF_CONSTRUCTION={ef_val}"
         async with self._aget_cursor() as cursor:
             await cursor.execute(
                 f"ALTER TABLE `{self._table_name}` "
                 f"ADD VECTOR INDEX `{index_name}` (embedding) "
-                f"M={m_val} DISTANCE={dist_val}"
+                f"M={m_val}{ef_clause} DISTANCE={dist_val}"
             )
         self._vector_index_name = index_name
         logger.info("Vector index '%s' created on table %s", index_name, self._table_name)
@@ -776,15 +1217,11 @@ class PolarDBXVectorStore(VectorStore):
 
     def _create_table_if_not_exists(self, dimension: int) -> None:
         """Create the vector table if it doesn't exist."""
+        self._embedding_dimension = dimension
         if self._table_exists():
             return
         with self._get_cursor() as cursor:
-            sql = SQL_CREATE_TABLE.format(
-                table_name=self._table_name,
-                dimension=dimension,
-                hnsw_m=self._hnsw_m,
-                distance_function=self._distance_strategy.upper(),
-            )
+            sql = self._build_create_table_sql(dimension)
             cursor.execute(sql)
             logger.info(
                 "Created table %s with vector dimension %d", self._table_name, dimension
@@ -792,15 +1229,11 @@ class PolarDBXVectorStore(VectorStore):
 
     async def _acreate_table_if_not_exists(self, dimension: int) -> None:
         """Async create the vector table if it doesn't exist."""
+        self._embedding_dimension = dimension
         if await self._atable_exists():
             return
         async with self._aget_cursor() as cursor:
-            sql = SQL_CREATE_TABLE.format(
-                table_name=self._table_name,
-                dimension=dimension,
-                hnsw_m=self._hnsw_m,
-                distance_function=self._distance_strategy.upper(),
-            )
+            sql = self._build_create_table_sql(dimension)
             await cursor.execute(sql)
             logger.info(
                 "Created table %s with vector dimension %d", self._table_name, dimension
@@ -827,9 +1260,53 @@ class PolarDBXVectorStore(VectorStore):
         if self._distance_strategy == "cosine":
             # For cosine distance [0, 2]: similarity = 1 - distance/2
             return max(0.0, 1.0 - distance / 2.0)
+        elif self._distance_strategy == "inner_product":
+            # VEC_DISTANCE_INNER_PRODUCT returns negative dot product
+            # (smaller distance = larger dot product = more similar)
+            return max(0.0, -distance)
         else:
             # For euclidean distance [0, inf): similarity = 1 / (1 + distance)
             return 1.0 / (1.0 + distance)
+
+    def _validate_embedding_dimensions(
+        self, embeddings: List[List[float]], expected: int
+    ) -> None:
+        """Validate that all embeddings have the expected dimension.
+
+        Uses ``VECTOR_DIM`` on a sample vector to cross-check that the
+        DN's notion of dimension matches the client's.  This catches
+        mismatches early before batch insert.
+
+        Args:
+            embeddings: List of embedding vectors.
+            expected: Expected dimension.
+
+        Raises:
+            ValueError: If any embedding has a different dimension.
+        """
+        for i, emb in enumerate(embeddings):
+            if len(emb) != expected:
+                raise ValueError(
+                    f"Embedding at index {i} has dimension {len(emb)}, "
+                    f"expected {expected}."
+                )
+        # Cross-check with DN's VECTOR_DIM if available
+        try:
+            sample_vec = self._vector_to_string(embeddings[0])
+            with self._get_cursor() as cursor:
+                cursor.execute(
+                    f"SELECT VECTOR_DIM(VEC_FROMTEXT('{sample_vec}')) AS dim"
+                )
+                row = cursor.fetchone()
+                if row and row.get("dim") != expected:
+                    raise ValueError(
+                        f"DN VECTOR_DIM reports {row.get('dim')}, "
+                        f"but client expected {expected}."
+                    )
+        except ValueError:
+            raise
+        except Exception as e:
+            logger.debug("VECTOR_DIM cross-check failed: %s", e)
 
     def _fetch_embeddings_by_ids(self, ids: List[str]) -> List[List[float]]:
         """Fetch embedding vectors from the database by document IDs.
@@ -844,8 +1321,14 @@ class PolarDBXVectorStore(VectorStore):
         if not ids:
             return []
         placeholders = ", ".join(["%s"] * len(ids))
+        # Use VEC_TOTEXT if available (v3), otherwise CAST(embedding AS CHAR)
+        emb_expr = (
+            "VEC_TOTEXT(embedding)"
+            if self._capabilities.get("vec_totext", False)
+            else "CAST(embedding AS CHAR)"
+        )
         sql = f"""
-        SELECT id, CAST(embedding AS CHAR) as emb_str
+        SELECT id, {emb_expr} as emb_str
         FROM `{self._table_name}`
         WHERE id IN ({placeholders})
         """
@@ -879,8 +1362,14 @@ class PolarDBXVectorStore(VectorStore):
         if not ids:
             return []
         placeholders = ", ".join(["%s"] * len(ids))
+        # Use VEC_TOTEXT if available (v3), otherwise CAST(embedding AS CHAR)
+        emb_expr = (
+            "VEC_TOTEXT(embedding)"
+            if self._capabilities.get("vec_totext", False)
+            else "CAST(embedding AS CHAR)"
+        )
         sql = f"""
-        SELECT id, CAST(embedding AS CHAR) as emb_str
+        SELECT id, {emb_expr} as emb_str
         FROM `{self._table_name}`
         WHERE id IN ({placeholders})
         """
@@ -1018,6 +1507,10 @@ class PolarDBXVectorStore(VectorStore):
         dimension = len(embeddings[0])
         self._create_table_if_not_exists(dimension)
 
+        # Validate vector dimensions using VECTOR_DIM if available (v3)
+        if self._capabilities.get("vec_dim", False):
+            self._validate_embedding_dimensions(embeddings, dimension)
+
         # Prepare IDs
         if ids is None:
             ids = [str(uuid.uuid4()) for _ in texts_list]
@@ -1026,7 +1519,7 @@ class PolarDBXVectorStore(VectorStore):
         if metadatas is None:
             metadatas = [{} for _ in texts_list]
 
-        # Insert in batches
+        # Insert in batches (executemany uses prepared statements internally)
         with self._get_cursor() as cursor:
             sql = SQL_UPSERT.format(table_name=self._table_name)
 
@@ -1269,6 +1762,11 @@ class PolarDBXVectorStore(VectorStore):
         texts = [te[0] for te in text_embeddings_list]
         embeddings = [te[1] for te in text_embeddings_list]
 
+        # Validate vector dimensions using VECTOR_DIM if available (v3)
+        dimension = len(embeddings[0])
+        if self._capabilities.get("vec_dim", False):
+            self._validate_embedding_dimensions(embeddings, dimension)
+
         # Prepare IDs
         if ids is None:
             ids = [str(uuid.uuid4()) for _ in text_embeddings_list]
@@ -1348,6 +1846,11 @@ class PolarDBXVectorStore(VectorStore):
         # Extract texts and embeddings
         texts = [te[0] for te in text_embeddings_list]
         embeddings = [te[1] for te in text_embeddings_list]
+
+        # Validate vector dimensions using VECTOR_DIM if available (v3)
+        dimension = len(embeddings[0])
+        if self._capabilities.get("vec_dim", False):
+            self._validate_embedding_dimensions(embeddings, dimension)
 
         # Prepare IDs
         if ids is None:
@@ -1581,6 +2084,119 @@ class PolarDBXVectorStore(VectorStore):
         )
         return ids
 
+    def bulk_upsert(
+        self,
+        texts: List[str],
+        embeddings: List[List[float]],
+        ids: Optional[List[str]] = None,
+        metadatas: Optional[List[dict]] = None,
+        *,
+        batch_size: int = 500,
+    ) -> List[str]:
+        """Bulk upsert texts with pre-computed embeddings.
+
+        Unlike ``upsert``, this method skips the embedding step entirely,
+        making it suitable for large-scale data imports where embeddings
+        are computed externally.
+
+        Args:
+            texts: List of text strings.
+            embeddings: List of pre-computed embedding vectors.
+            ids: Optional list of IDs. If not provided, UUIDs are generated.
+            metadatas: Optional list of metadata dictionaries.
+            batch_size: Number of records per batch. Defaults to 500.
+
+        Returns:
+            List of IDs of the upserted records.
+        """
+        if not texts:
+            return []
+        if len(texts) != len(embeddings):
+            raise ValueError(
+                f"Number of texts ({len(texts)}) must match "
+                f"number of embeddings ({len(embeddings)})"
+            )
+
+        dimension = len(embeddings[0])
+        self._create_table_if_not_exists(dimension)
+
+        if self._capabilities.get("vec_dim", False):
+            self._validate_embedding_dimensions(embeddings, dimension)
+
+        if ids is None:
+            ids = [str(uuid.uuid4()) for _ in texts]
+        if metadatas is None:
+            metadatas = [{} for _ in texts]
+
+        with self._get_cursor() as cursor:
+            sql = SQL_UPSERT.format(table_name=self._table_name)
+            for i in range(0, len(texts), batch_size):
+                batch_end = min(i + batch_size, len(texts))
+                batch_values = [
+                    (
+                        ids[j],
+                        texts[j],
+                        json.dumps(metadatas[j]),
+                        self._vector_to_string(embeddings[j]),
+                    )
+                    for j in range(i, batch_end)
+                ]
+                cursor.executemany(sql, batch_values)
+
+        logger.info(
+            "Bulk upserted %d records to table %s", len(texts), self._table_name
+        )
+        return ids
+
+    async def abulk_upsert(
+        self,
+        texts: List[str],
+        embeddings: List[List[float]],
+        ids: Optional[List[str]] = None,
+        metadatas: Optional[List[dict]] = None,
+        *,
+        batch_size: int = 500,
+    ) -> List[str]:
+        """Async bulk upsert texts with pre-computed embeddings."""
+        if not texts:
+            return []
+        if len(texts) != len(embeddings):
+            raise ValueError(
+                f"Number of texts ({len(texts)}) must match "
+                f"number of embeddings ({len(embeddings)})"
+            )
+
+        dimension = len(embeddings[0])
+        await self._acreate_table_if_not_exists(dimension)
+
+        if self._capabilities.get("vec_dim", False):
+            self._validate_embedding_dimensions(embeddings, dimension)
+
+        if ids is None:
+            ids = [str(uuid.uuid4()) for _ in texts]
+        if metadatas is None:
+            metadatas = [{} for _ in texts]
+
+        async with self._aget_cursor() as cursor:
+            sql = SQL_UPSERT.format(table_name=self._table_name)
+            for i in range(0, len(texts), batch_size):
+                batch_end = min(i + batch_size, len(texts))
+                batch_values = [
+                    (
+                        ids[j],
+                        texts[j],
+                        json.dumps(metadatas[j]),
+                        self._vector_to_string(embeddings[j]),
+                    )
+                    for j in range(i, batch_end)
+                ]
+                await cursor.executemany(sql, batch_values)
+
+        logger.info(
+            "Bulk upserted %d records to table %s", len(texts), self._table_name
+        )
+        return ids
+
     def similarity_search(
         self,
         query: str,
@@ -1687,12 +2303,8 @@ class PolarDBXVectorStore(VectorStore):
         # Build WHERE clause using the filter builder
         where_clause, filter_params = self._build_filter_clause(filter)
 
-        # Choose distance function
-        distance_func = (
-            "VEC_DISTANCE_COSINE"
-            if self._distance_strategy == "cosine"
-            else "VEC_DISTANCE_EUCLIDEAN"
-        )
+        # Choose distance function (VEC_DISTANCE if available for HNSW acceleration)
+        distance_func = self._get_distance_func()
 
         # Build index hint for ANN/KNN mode
         index_hint = self._build_index_hint(search_type)
@@ -1853,12 +2465,8 @@ class PolarDBXVectorStore(VectorStore):
         # Build WHERE clause using the filter builder
         where_clause, filter_params = self._build_filter_clause(filter)
 
-        # Choose distance function
-        distance_func = (
-            "VEC_DISTANCE_COSINE"
-            if self._distance_strategy == "cosine"
-            else "VEC_DISTANCE_EUCLIDEAN"
-        )
+        # Choose distance function (VEC_DISTANCE if available for HNSW acceleration)
+        distance_func = self._get_distance_func()
 
         # Build index hint for ANN/KNN mode
         index_hint = self._build_index_hint(search_type)
@@ -2097,7 +2705,7 @@ class PolarDBXVectorStore(VectorStore):
         password: str,
         database: str,
         table_name: str = "polardbx_vectors",
-        distance_strategy: Literal["cosine", "euclidean"] = "cosine",
+        distance_strategy: Literal["cosine", "euclidean", "inner_product"] = "cosine",
         hnsw_m: int = 6,
         ids: Optional[List[str]] = None,
         **kwargs: Any,
@@ -2149,7 +2757,7 @@ class PolarDBXVectorStore(VectorStore):
         password: str,
         database: str,
         table_name: str = "polardbx_vectors",
-        distance_strategy: Literal["cosine", "euclidean"] = "cosine",
+        distance_strategy: Literal["cosine", "euclidean", "inner_product"] = "cosine",
         hnsw_m: int = 6,
         ids: Optional[List[str]] = None,
         **kwargs: Any,
@@ -2213,7 +2821,7 @@ class PolarDBXVectorStore(VectorStore):
         password: str,
         database: str,
         table_name: str = "polardbx_vectors",
-        distance_strategy: Literal["cosine", "euclidean"] = "cosine",
+        distance_strategy: Literal["cosine", "euclidean", "inner_product"] = "cosine",
         hnsw_m: int = 6,
         ids: Optional[List[str]] = None,
         **kwargs: Any,
@@ -2265,7 +2873,7 @@ class PolarDBXVectorStore(VectorStore):
         password: str,
         database: str,
         table_name: str = "polardbx_vectors",
-        distance_strategy: Literal["cosine", "euclidean"] = "cosine",
+        distance_strategy: Literal["cosine", "euclidean", "inner_product"] = "cosine",
         hnsw_m: int = 6,
         ids: Optional[List[str]] = None,
         **kwargs: Any,

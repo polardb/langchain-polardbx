@@ -7,7 +7,7 @@ from urllib.parse import urlparse
 import numpy as np
 from langchain_core.embeddings import Embeddings
 
-from langchain_polardbx import PolarDBXVectorStore
+from langchain_polardbx import NotSupportedError, PolarDBXVectorStore
 
 # ---- .env loading (search upward from this file) ----
 
@@ -90,3 +90,8 @@ def make_store(
         distance_strategy=distance_strategy, pre_delete_table=pre_delete,
         **kwargs,
     )
+
+
+def is_v3(store: PolarDBXVectorStore) -> bool:
+    """Check if the connected instance supports v3 vector features."""
+    return store._capabilities.get("vec_distance", False)

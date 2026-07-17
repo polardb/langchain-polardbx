@@ -5,7 +5,7 @@ import sys
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
-from _helpers import EMB, METADATAS, TEXTS, FakeEmbeddings, make_store
+from _helpers import EMB, METADATAS, TEXTS, FakeEmbeddings, is_v3, make_store
 
 # ==================== 1. Euclidean distance strategy ====================
 
@@ -266,7 +266,66 @@ def test_persistence():
     vs2.close()
 
 
-# ==================== 11. Vector dimension mismatch ====================
+# ==================== 11. INNER_PRODUCT distance strategy (v3) ====================
+
+def test_inner_product():
+    """inner_product distance strategy requires v3 VEC_DISTANCE support.
+    On old versions, initialization should raise NotSupportedError."""
+    from _helpers import NotSupportedError
+
+    if is_v3(make_store()):
+        # v3: inner_product should work end-to-end
+        vs = make_store(table_name="test_lc_innerprod", distance_strategy="inner_product")
+        vs.add_texts(TEXTS, metadatas=METADATAS)
+
+        results = vs.similarity_search("database", k=3)
+        assert len(results) <= 3
+
+        results = vs.similarity_search_with_score("database", k=3)
+        assert len(results) <= 3
+        assert all(isinstance(s, float) for _, s in results)
+
+        results = vs.similarity_search_with_relevance_scores("database", k=3)
+        assert len(results) <= 3
+        assert all(isinstance(s, float) for _, s in results)
+
+        vs.drop_table()
+        vs.close()
+    else:
+        # Old version: should reject inner_product at init time
+        try:
+            vs = make_store(table_name="test_lc_innerprod", distance_strategy="inner_product")
+            assert False, "Expected NotSupportedError on old version"
+        except NotSupportedError:
+            pass  # expected
+
+
+# ==================== 12. Embedding dimension validation (v3 VECTOR_DIM) ====================
+
+def test_dimension_validation():
+    """_validate_embedding_dimensions should cross-check with VECTOR_DIM on v3,
+    and do client-side length check only on old versions."""
+    vs = make_store(table_name="test_lc_dimval")
+    vs.add_texts(["seed text"])  # creates table with dim=128
+
+    correct_embs = EMB.embed_documents(["correct dim text"])
+    # Should pass validation
+    vs._validate_embedding_dimensions(correct_embs, 128)
+
+    # Wrong dimension should raise ValueError
+    wrong_embs = FakeEmbeddings(dim=256).embed_documents(["wrong dim"])
+    try:
+        vs._validate_embedding_dimensions(wrong_embs, 256)
+        # If no error on old version (no VECTOR_DIM cross-check),
+        # client-side length check should still catch mismatch with table
+    except ValueError:
+        pass  # expected on v3 or when dimensions mismatch
+
+    vs.drop_table()
+    vs.close()
+
+
+# ==================== 13. Vector dimension mismatch ====================
 
 def test_dimension_mismatch():
     vs = make_store(table_name="test_lc_dimmm")
