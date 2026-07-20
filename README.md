@@ -52,7 +52,7 @@ All transaction isolation levels (READ-COMMITTED, REPEATABLE-READ, SERIALIZABLE)
 
 ```bash
 # From source (until PyPI release)
-pip install -e .
+pip install -e libs/langchain-polardbx/
 ```
 
 <!-- Once published to PyPI:
@@ -422,6 +422,8 @@ This integration uses PolarDB-X's native vector functions:
 This package uses [uv](https://docs.astral.sh/uv/) for dependency management.
 
 ```bash
+cd libs/langchain-polardbx
+
 # Install dependencies
 uv sync --group test --group test_integration
 
