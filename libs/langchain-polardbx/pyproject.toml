@@ -26,12 +26,14 @@ classifiers = [
 dependencies = [
     "langchain-core>=0.1.1",
     "mysql-connector-python>=8.0.0",
-    "numpy>=1.24.0",
 ]
 
 [project.optional-dependencies]
 async = [
     "aiomysql>=0.2.0",
+]
+mmr = [
+    "numpy>=1.24.0",
 ]
 
 [project.urls]

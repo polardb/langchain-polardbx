@@ -3263,7 +3263,7 @@ class PolarDBXVectorStore(VectorStore):
         except ImportError as e:
             raise ImportError(
                 "numpy is required for MMR search. "
-                "Please install it with `pip install numpy`."
+                "Please install it with `pip install langchain-polardbx[mmr]`."
             ) from e
 
         if not embedding_list:
