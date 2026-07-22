@@ -2316,7 +2316,9 @@ class PolarDBXVectorStore(VectorStore):
             filter: Optional metadata filter dictionary. Supports:
                 - Simple: {"key": "value"}
                 - Operators: {"key": {"$gt": 10}}
-            score_threshold: Optional minimum similarity score threshold.
+            score_threshold: Optional maximum distance threshold. Only results
+                with distance <= score_threshold are returned. Lower distance
+                means more similar. Defaults to None (no filtering).
             **kwargs: Additional keyword arguments:
                 - ef_search: int — HNSW ef_search parameter [1, 10000].
                   Higher = more accurate but slower. Default: None (server default 20).
@@ -2363,11 +2365,9 @@ class PolarDBXVectorStore(VectorStore):
                 for record in cursor:
                     distance = float(record["distance"])
 
-                    # Apply score threshold (threshold is a similarity value)
-                    if score_threshold is not None:
-                        similarity = self._distance_to_similarity(distance)
-                        if similarity < score_threshold:
-                            continue
+                    # Apply distance threshold (filter out results that are too far)
+                    if score_threshold is not None and distance > score_threshold:
+                        continue
 
                     metadata = record["metadata"]
                     if isinstance(metadata, str):
@@ -2480,7 +2480,9 @@ class PolarDBXVectorStore(VectorStore):
             embedding: Embedding vector to search for.
             k: Number of documents to return. Defaults to 4.
             filter: Optional metadata filter dictionary.
-            score_threshold: Optional minimum similarity score threshold.
+            score_threshold: Optional maximum distance threshold. Only results
+                with distance <= score_threshold are returned. Lower distance
+                means more similar. Defaults to None (no filtering).
             **kwargs: Additional keyword arguments:
                 - ef_search: int — HNSW ef_search parameter [1, 10000].
                 - search_type: str — "ann", "knn", or "auto". Default: "auto".
@@ -2528,11 +2530,9 @@ class PolarDBXVectorStore(VectorStore):
                 async for record in cursor:
                     distance = float(record["distance"])
 
-                    # Apply score threshold (threshold is a similarity value)
-                    if score_threshold is not None:
-                        similarity = self._distance_to_similarity(distance)
-                        if similarity < score_threshold:
-                            continue
+                    # Apply distance threshold (filter out results that are too far)
+                    if score_threshold is not None and distance > score_threshold:
+                        continue
 
                     metadata = record["metadata"]
                     if isinstance(metadata, str):

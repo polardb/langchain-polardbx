@@ -101,15 +101,24 @@ def test_score_threshold():
     results = vs.similarity_search_with_score_by_vector(vec, k=5)
     assert len(results) == 5
 
-    # With high threshold — should filter most out
+    # score_threshold is a distance threshold: only results with
+    # distance <= threshold are returned (lower distance = more similar).
+
+    # With high threshold (0.99) — allows most results (distance <= 0.99)
     results_high = vs.similarity_search_with_score_by_vector(vec, k=5, score_threshold=0.99)
+    assert len(results_high) <= 5
 
-    # With low threshold — should keep all
+    # With low threshold (0.0) — only exact matches (distance <= 0.0)
+    # should return 0 for non-identical vectors
     results_low = vs.similarity_search_with_score_by_vector(vec, k=5, score_threshold=0.0)
-    assert len(results_low) == 5
+    assert len(results_low) == 0
 
-    # High threshold should return <= no threshold
-    assert len(results_high) <= len(results_low)
+    # High threshold should return >= low threshold
+    assert len(results_high) >= len(results_low)
+
+    # Verify all returned distances respect the threshold
+    for _, score in results_high:
+        assert score <= 0.99
 
     vs.drop_table()
     vs.close()

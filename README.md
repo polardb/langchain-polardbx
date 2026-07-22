@@ -196,7 +196,7 @@ Supported filter operators:
 ### Score Threshold Filtering
 
 ```python
-# Only return results with similarity score >= 0.8
+# Only return results with distance <= 0.8 (lower distance = more similar)
 results = vectorstore.similarity_search_with_score(
     "Hello",
     k=10,
