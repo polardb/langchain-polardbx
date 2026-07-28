@@ -33,18 +33,18 @@ All transaction isolation levels (READ-COMMITTED, REPEATABLE-READ, SERIALIZABLE)
 
 - **Native Vector Storage**: Store embeddings using PolarDB-X's native `VECTOR(N)` data type
 - **HNSW Index**: Efficient approximate nearest neighbor search with configurable `M` and `EF_CONSTRUCTION` parameters
-- **Multiple Distance Metrics**: Support for Cosine, Euclidean, and Inner Product distance (v3)
+- **Multiple Distance Metrics**: Support for Cosine, Euclidean, and Inner Product distance
 - **Similarity Search**: Perform efficient similarity searches with score thresholds
 - **MMR Search**: Maximal Marginal Relevance search for diverse results
 - **Metadata Filtering**: Filter search results by metadata with rich operators (`$eq`, `$ne`, `$gt`, `$gte`, `$lt`, `$lte`, `$in`, `$nin`, `$like`)
 - **Dynamic Index Management**: Create, drop, and rebuild vector indexes at runtime without recreating tables
 - **Search Mode Control**: Switch between ANN (index-accelerated) and KNN (full-scan) modes per query
 - **Per-Query Tuning**: Adjust `ef_search` on a per-query basis for accuracy/latency trade-offs
-- **Index Health Monitoring**: Runtime statistics, index health diagnostics, and preload checks (v3)
+- **Index Health Monitoring**: Runtime statistics, index health diagnostics, and preload checks
 - **Batch Operations**: Efficient batch insert and bulk upsert with configurable batch size
 - **Full Async Support**: All public methods have async equivalents (`aadd_texts`, `asimilarity_search`, etc.)
 - **Dual-Version Compatibility**: Automatically detects database capabilities and adapts SQL accordingly
-- **Partitioned Table Support**: Create partitioned vector tables on old PolarDB-X versions (HASH/KEY partitioning)
+- **Partitioned Table Support**: Create partitioned vector tables with HASH/KEY partitioning
 - **Connection Pooling**: Built-in connection pool with automatic retry logic
 
 ## Installation
@@ -97,7 +97,7 @@ vectorstore = PolarDBXVectorStore(
     database="your-database",
     embedding=embeddings,
     table_name="my_vectors",
-    distance_strategy="cosine",  # or "euclidean", "inner_product" (v3 only)
+    distance_strategy="cosine",  # or "euclidean", "inner_product"
     hnsw_m=16,  # HNSW index M parameter (3-200)
 )
 
@@ -244,7 +244,7 @@ vectorstore.apply_vector_index(
     index_name="my_vi",
     m=16,
     distance="COSINE",
-    ef_construction=200,  # v3 only, ignored on old versions
+    ef_construction=200,
 )
 
 # Drop the vector index
@@ -254,7 +254,7 @@ vectorstore.drop_vector_index()
 vectorstore.optimize()
 ```
 
-### Index Monitoring (v3 only)
+### Index Monitoring
 
 ```python
 # Get runtime statistics
@@ -350,7 +350,7 @@ async def main():
     await vectorstore.adrop_vector_index()
     await vectorstore.aoptimize()
 
-    # v3 monitoring
+    # Index monitoring
     stats = await vectorstore.aget_stats()
     await vectorstore.apreload_index()
     health = await vectorstore.aexplain_index_health()
@@ -358,12 +358,11 @@ async def main():
 asyncio.run(main())
 ```
 
-### Partitioned Table (Old Versions Only)
+### Partitioned Table
 
 ```python
 # Create a partitioned vector table (HASH partitioning, 8 partitions)
-# Note: Not supported on v3 instances (v3 does not support vector indexes
-# on partitioned tables)
+# Note: Not available on all PolarDB-X versions
 vectorstore = PolarDBXVectorStore(
     host="your-host",
     port=3306,
@@ -388,16 +387,16 @@ vectorstore = PolarDBXVectorStore(
 | `database` | str | - | Database name |
 | `embedding` | Embeddings | - | LangChain embedding model |
 | `table_name` | str | `"polardbx_vectors"` | Table name for vector storage |
-| `distance_strategy` | str | `"cosine"` | Distance function: `"cosine"`, `"euclidean"`, or `"inner_product"` (v3) |
+| `distance_strategy` | str | `"cosine"` | Distance function: `"cosine"`, `"euclidean"`, or `"inner_product"` |
 | `hnsw_m` | int | 6 | HNSW index M parameter (3-200) |
 | `pool_size` | int | 5 | Connection pool size |
 | `pre_delete_table` | bool | False | Drop table before creating |
 | `embedding_dimension` | int | None | Embedding dimension (auto-inferred if not provided) |
-| `ef_construction` | int | None | HNSW build-time candidate list size (5-1000, v3 only) |
+| `ef_construction` | int | None | HNSW build-time candidate list size (5-1000) |
 | `connection_retries` | int | 3 | Number of connection retry attempts |
 | `retry_delay` | float | 1.0 | Delay between retries in seconds |
 | `vector_index_name` | str | None | Vector index name for FORCE INDEX hints (auto-detected if None) |
-| `partition_by` | str | None | Partition strategy: `"HASH"` or `"KEY"` (old versions only) |
+| `partition_by` | str | None | Partition strategy: `"HASH"` or `"KEY"` |
 | `partitions` | int | 0 | Number of partitions (only effective with `partition_by`) |
 | `**kwargs` | - | - | Additional connection arguments (e.g. `ssl_ca`, `ssl_cert`, `ssl_key`, `ssl_disabled`) |
 
@@ -408,18 +407,18 @@ This integration uses PolarDB-X's native vector functions:
 - `VECTOR(N)` — Vector column data type with N dimensions
 - `VEC_FROMTEXT('[1,2,3]')` — Convert JSON array string to vector
 - `VEC_TOTEXT(vector)` — Convert vector to JSON array string
-- `VEC_DISTANCE(v1, v2)` — Auto-inferred distance function (v3)
-- `VEC_DISTANCE_COSINE(v1, v2)` — Cosine distance (old versions)
-- `VEC_DISTANCE_EUCLIDEAN(v1, v2)` — Euclidean distance (old versions)
-- `VEC_DISTANCE_INNER_PRODUCT(v1, v2)` — Inner product distance (old versions)
-- `VECTOR_DIM(v)` — Get vector dimension (v3)
+- `VEC_DISTANCE(v1, v2)` — Auto-inferred distance function
+- `VEC_DISTANCE_COSINE(v1, v2)` — Cosine distance
+- `VEC_DISTANCE_EUCLIDEAN(v1, v2)` — Euclidean distance
+- `VEC_DISTANCE_INNER_PRODUCT(v1, v2)` — Inner product distance
+- `VECTOR_DIM(v)` — Get vector dimension
 - `VECTOR INDEX (col) M=N DISTANCE=COSINE` — HNSW vector index DDL
-- `EF_CONSTRUCTION=N` — HNSW build-time parameter in DDL (v3)
+- `EF_CONSTRUCTION=N` — HNSW build-time parameter in DDL
 - `SET SESSION vidx_hnsw_ef_search = N` — Per-session search width tuning
 - `SHOW GLOBAL STATUS LIKE 'Vidx%'` — Runtime index statistics
-- `CALL dbms_vidx.preload(db, table, col)` — Preload index into cache (v3)
-- `CALL dbms_vidx.preload_check(db, table, col)` — Check preload feasibility (v3)
-- `information_schema.VECTOR_INDEXES` — Vector index metadata view (v3)
+- `CALL dbms_vidx.preload(db, table, col)` — Preload index into cache
+- `CALL dbms_vidx.preload_check(db, table, col)` — Check preload feasibility
+- `information_schema.VECTOR_INDEXES` — Vector index metadata view
 
 ## Development
 
