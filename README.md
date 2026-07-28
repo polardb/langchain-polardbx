@@ -10,10 +10,11 @@ PolarDB-X is a cloud-native distributed database system developed by Alibaba Clo
 
 ## Requirements
 
-- Python 3.10+
+- Python 3.9+
 - PolarDB-X with vector index support
 - MySQL connector: `mysql-connector-python>=8.0.0` (included in package dependencies)
-- Async support: `aiomysql>=0.2.0` (included in package dependencies)
+- Async support: `pip install langchain-polardbx[async]` (optional)
+- MMR search: `pip install langchain-polardbx[mmr]` (optional)
 
 ### Enable Vector Index
 
@@ -48,20 +49,23 @@ All transaction isolation levels (READ-COMMITTED, REPEATABLE-READ, SERIALIZABLE)
 
 ## Installation
 
-<!-- PyPI publish pending, use local install for now -->
-
 ```bash
-# From source (until PyPI release)
-pip install -e libs/langchain-polardbx/
+pip install langchain-polardbx
 ```
-
-<!-- Once published to PyPI:
-```bash
-pip install -U langchain-polardbx
-```
--->
 
 ### Optional Dependencies
+
+For async support:
+
+```bash
+pip install langchain-polardbx[async]
+```
+
+For MMR search support:
+
+```bash
+pip install langchain-polardbx[mmr]
+```
 
 For using OpenAI embeddings:
 
