@@ -29,6 +29,8 @@ This setting takes effect immediately for new connections. No restart required.
 
 All transaction isolation levels (READ-COMMITTED, REPEATABLE-READ, SERIALIZABLE) are supported — choose according to your business needs.
 
+> **Note**: Some advanced features (e.g., inner product distance, index monitoring, `EF_CONSTRUCTION` parameter) require newer PolarDB-X versions. The package automatically detects available capabilities and adapts accordingly.
+
 ## Features
 
 - **Native Vector Storage**: Store embeddings using PolarDB-X's native `VECTOR(N)` data type
