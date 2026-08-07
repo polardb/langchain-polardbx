@@ -1,6 +1,6 @@
 # 🦜️🔗 LangChain PolarDB-X
 
-A powerful integration between LangChain and PolarDB-X, enabling native vector search capabilities for AI applications.
+A powerful integration between LangChain and PolarDB-X, enabling native vector search and SQL query capabilities for AI applications.
 
 ## Overview
 
@@ -15,6 +15,7 @@ PolarDB-X is a cloud-native distributed database system developed by Alibaba Clo
 - MySQL connector: `mysql-connector-python>=8.0.0` (included in package dependencies)
 - Async support: `pip install langchain-polardbx[async]` (optional)
 - MMR search: `pip install langchain-polardbx[mmr]` (optional)
+- SQL database: `pip install langchain-polardbx[sql]` (optional)
 
 ### Enable Vector Index
 
@@ -48,6 +49,7 @@ All transaction isolation levels (READ-COMMITTED, REPEATABLE-READ, SERIALIZABLE)
 - **Dual-Version Compatibility**: Automatically detects database capabilities and adapts SQL accordingly
 - **Partitioned Table Support**: Create partitioned vector tables with HASH/KEY partitioning
 - **Connection Pooling**: Built-in connection pool with automatic retry logic
+- **SQL Database Integration**: Use PolarDB-X as a SQL database for LangChain agents with automatic DDL reflection compatibility (tab indentation, ENUM spacing, VECTOR type support)
 
 ## Installation
 
@@ -67,6 +69,12 @@ For MMR search support:
 
 ```bash
 pip install langchain-polardbx[mmr]
+```
+
+For SQL database support (enables LangChain SQL agents):
+
+```bash
+pip install langchain-polardbx[sql]
 ```
 
 For using OpenAI embeddings:
@@ -138,6 +146,48 @@ vectorstore = PolarDBXVectorStore(
     table_name="langchain_vectors",
 )
 ```
+
+### SQL Database
+
+`PolarDBXSQLDatabase` wraps LangChain's `SQLDatabase` with PolarDB-X-specific DDL reflection fixes, enabling seamless use with LangChain SQL agents. It automatically:
+
+- Normalizes tab indentation in `SHOW CREATE TABLE` output (PolarDB-X uses tabs, standard MySQL uses two spaces)
+- Fixes ENUM/SET value list spacing (`enum('A', 'B')` → `enum('A','B')`)
+- Registers a custom `VECTOR` type so tables with vector columns don't crash reflection
+- Auto-swaps `mysql+pymysql://` URIs to use the PolarDB-X dialect
+
+```python
+from langchain_polardbx import PolarDBXSQLDatabase
+
+db = PolarDBXSQLDatabase.from_uri(
+    "mysql+pymysql://user:password@host:3306/your-database"
+)
+
+# List tables
+tables = db.get_usable_table_names()
+
+# Get table schema info for SQL agents
+info = db.get_table_info(["your_table"])
+
+# Run SQL queries
+result = db.run("SELECT COUNT(*) FROM your_table")
+```
+
+Use with LangChain SQL agent:
+
+```python
+from langchain_community.agent_toolkits.sql.base import create_sql_agent
+from langchain_community.agent_toolkits.sql.toolkit import SQLDatabaseToolkit
+from langchain_openai import ChatOpenAI
+
+llm = ChatOpenAI(temperature=0)
+toolkit = SQLDatabaseToolkit(db=db, llm=llm)
+agent = create_sql_agent(llm=llm, toolkit=toolkit)
+
+agent.invoke({"input": "How many records are in your_table?"})
+```
+
+> **Note**: `VECTOR INDEX` definitions in `SHOW CREATE TABLE` are not parsed by SQLAlchemy and will be silently skipped with a warning. This is expected — the index info is not needed for SQL query generation. Tables with `VECTOR` columns are fully supported.
 
 ## Usage Examples
 

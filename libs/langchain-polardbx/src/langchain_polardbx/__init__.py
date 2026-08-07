@@ -1,4 +1,11 @@
 from langchain_polardbx.vectorstores import NotSupportedError, PolarDBXVectorStore
 
-__all__ = ["PolarDBXVectorStore", "NotSupportedError"]
-__version__ = "0.1.0"
+# PolarDBXSQLDatabase requires [sql] extra; import lazily
+try:
+    from langchain_polardbx.sql import PolarDBXSQLDatabase
+
+    __all__ = ["PolarDBXVectorStore", "PolarDBXSQLDatabase", "NotSupportedError"]
+except ImportError:
+    __all__ = ["PolarDBXVectorStore", "NotSupportedError"]
+
+__version__ = "0.1.2"
