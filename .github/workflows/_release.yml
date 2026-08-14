@@ -167,13 +167,9 @@ jobs:
         run: make tests
         working-directory: ${{ inputs.working-directory }}
 
-      - name: Run integration tests
-        env:
-          PARTNER_API_KEY: ${{ secrets.PARTNER_API_KEY }}
-        run: |
-          uv sync --group test --group test_integration
-          make integration_tests
-        working-directory: ${{ inputs.working-directory }}
+      # Integration tests are not run in CI because they require a live
+      # PolarDB-X instance. They are compiled (import-checked) in the
+      # check_diffs workflow and run manually against a real database.
 
       - name: Get minimum versions
         working-directory: ${{ inputs.working-directory }}
