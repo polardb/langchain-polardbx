@@ -70,16 +70,7 @@ CREATE TABLE IF NOT EXISTS `{table_name}` (
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
 """
 
-SQL_CREATE_TABLE_PARTITIONED = """
-CREATE TABLE IF NOT EXISTS `{table_name}` (
-    id VARCHAR(36) PRIMARY KEY,
-    text LONGTEXT NOT NULL,
-    metadata JSON,
-    embedding VECTOR({dimension}) NOT NULL,
-    VECTOR INDEX (embedding) M={hnsw_m}{index_extra} DISTANCE={distance_function}
-) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
-PARTITION BY {partition_by}(id) PARTITIONS {partitions}
-"""
+# Partition clause is built dynamically by _build_partition_clause()
 
 SQL_INSERT = """
 INSERT INTO `{table_name}` (id, text, metadata, embedding)
@@ -169,6 +160,10 @@ class PolarDBXVectorStore(VectorStore):
         vector_index_name: Optional[str] = None,
         partition_by: Optional[str] = None,
         partitions: int = 0,
+        partition_column: Optional[str] = None,
+        broadcast: bool = False,
+        locality: Optional[str] = None,
+        partition_defs: Optional[List[Dict[str, Any]]] = None,
         **kwargs: Any,
     ) -> None:
         """Initialize the PolarDB-X vector store.
@@ -199,10 +194,22 @@ class PolarDBXVectorStore(VectorStore):
             retry_delay: Delay between retry attempts in seconds. Defaults to 1.0.
             vector_index_name: Name of the vector index for FORCE INDEX hints.
                 If None, auto-detected on first use. Defaults to None.
-            partition_by: Partition strategy for the table (e.g. "HASH", "KEY").
-                If None, creates a single-partition table. Defaults to None.
-            partitions: Number of partitions. Only effective when partition_by
-                is set. Defaults to 0.
+            partition_by: Partition strategy for the table. One of "HASH",
+                "KEY", "RANGE", "LIST", or None. If None and broadcast is
+                False, creates a single (non-partitioned) table.
+                Defaults to None.
+            partitions: Number of partitions. Required when partition_by
+                is "HASH" or "KEY". Defaults to 0.
+            partition_column: Column to partition on. Defaults to "id".
+            broadcast: If True, creates a broadcast table (full copy on
+                every DN node). Mutually exclusive with partition_by.
+                Defaults to False.
+            locality: Storage node specification, e.g. "dn=xxx".
+                Appended to DDL as LOCALITY clause. Defaults to None.
+            partition_defs: Partition definitions for RANGE/LIST
+                strategies. Each dict has a "name" key and either
+                "values_less_than" (RANGE) or "values_in" (LIST).
+                Defaults to None.
             **kwargs: Additional connection arguments passed to both sync and
                 async connection pools (e.g. ssl_ca, ssl_cert, ssl_key,
                 ssl_disabled for SSL/TLS encryption).
@@ -231,6 +238,10 @@ class PolarDBXVectorStore(VectorStore):
         self._vector_index_name = vector_index_name
         self._partition_by = partition_by.upper() if partition_by else None
         self._partitions = partitions
+        self._partition_column = partition_column or "id"
+        self._broadcast = broadcast
+        self._locality = locality
+        self._partition_defs = partition_defs
         self._ef_construction = ef_construction
         self._conn_kwargs = kwargs  # Extra connection args (e.g. SSL params)
 
@@ -250,14 +261,31 @@ class PolarDBXVectorStore(VectorStore):
         # (checked after _detect_capabilities, just store for now)
 
         # Validate partition params
-        if self._partition_by and self._partition_by not in ("HASH", "KEY"):
+        if self._partition_by and self._partition_by not in (
+            "HASH", "KEY", "RANGE", "LIST"
+        ):
             raise ValueError(
                 f"Invalid partition_by: {partition_by}. "
-                "Must be 'HASH' or 'KEY'."
+                "Must be 'HASH', 'KEY', 'RANGE', or 'LIST'."
             )
-        if self._partition_by and self._partitions <= 0:
+        if self._partition_by in ("HASH", "KEY") and self._partitions <= 0:
             raise ValueError(
-                "partitions must be > 0 when partition_by is specified."
+                "partitions must be > 0 when partition_by is "
+                "'HASH' or 'KEY'."
+            )
+        if self._partition_by in ("RANGE", "LIST") and not self._partition_defs:
+            raise ValueError(
+                "partition_defs must be provided when partition_by is "
+                "'RANGE' or 'LIST'."
+            )
+        if self._broadcast and self._partition_by:
+            raise ValueError(
+                "broadcast and partition_by are mutually exclusive. "
+                "Use one or the other."
+            )
+        if self._partition_by and self._partition_column != "id":
+            self._validate_identifier(
+                self._partition_column, "partition column"
             )
 
         # Create connection pool
@@ -303,18 +331,19 @@ class PolarDBXVectorStore(VectorStore):
                 "Use 'cosine' or 'euclidean' for old versions."
             )
 
-        # Validate partition_by is not supported on v3 instances
-        # (v3 does not support vector indexes on partitioned tables)
+        # Validate partition/broadcast is not supported on v3 instances
+        # (v3 does not support vector indexes on partitioned/broadcast tables)
         if (
-            self._partition_by
+            (self._partition_by or self._broadcast)
             and self._capabilities.get("vec_distance", False)
         ):
             self.close()
             raise NotSupportedError(
-                "partition_by is not supported on PolarDB-X v3 instances "
-                "because v3 does not support vector indexes on partitioned "
-                "tables. Omit the partition_by parameter to create a "
-                "non-partitioned table."
+                "partition_by and broadcast are not supported on "
+                "PolarDB-X v3 instances because v3 does not support "
+                "vector indexes on partitioned/broadcast tables. "
+                "Omit the partition_by/broadcast parameter to create "
+                "a non-partitioned table."
             )
 
         # Handle table creation
@@ -802,6 +831,73 @@ class PolarDBXVectorStore(VectorStore):
             return "VEC_DISTANCE_INNER_PRODUCT"
         return "VEC_DISTANCE_EUCLIDEAN"
 
+    def _build_partition_clause(self) -> str:
+        """Build the PARTITION/BROADCAST/LOCALITY clause for CREATE TABLE.
+
+        Returns an empty string for a single (non-partitioned) table.
+        """
+        parts: List[str] = []
+
+        if self._broadcast:
+            parts.append("BROADCAST")
+        elif self._partition_by:
+            col = self._partition_column
+            if self._partition_by in ("HASH", "KEY"):
+                parts.append(
+                    f"PARTITION BY {self._partition_by}({col}) "
+                    f"PARTITIONS {self._partitions}"
+                )
+            elif self._partition_by == "RANGE":
+                defs = self._build_range_partition_defs()
+                parts.append(f"PARTITION BY RANGE({col}) {defs}")
+            elif self._partition_by == "LIST":
+                defs = self._build_list_partition_defs()
+                parts.append(f"PARTITION BY LIST({col}) {defs}")
+
+        if self._locality:
+            parts.append(f"LOCALITY='{self._locality}'")
+
+        return "".join(f" {p}" for p in parts) if parts else ""
+
+    def _build_range_partition_defs(self) -> str:
+        """Build the RANGE partition definitions list."""
+        if not self._partition_defs:
+            raise ValueError(
+                "partition_defs required for RANGE partitioning"
+            )
+        items = []
+        for d in self._partition_defs:
+            name = d["name"]
+            vlt = d["values_less_than"]
+            if isinstance(vlt, str) and vlt.upper() == "MAXVALUE":
+                items.append(
+                    f"PARTITION {name} VALUES LESS THAN (MAXVALUE)"
+                )
+            else:
+                items.append(
+                    f"PARTITION {name} VALUES LESS THAN ({vlt})"
+                )
+        return "(" + ", ".join(items) + ")"
+
+    def _build_list_partition_defs(self) -> str:
+        """Build the LIST partition definitions list."""
+        if not self._partition_defs:
+            raise ValueError(
+                "partition_defs required for LIST partitioning"
+            )
+        items = []
+        for d in self._partition_defs:
+            name = d["name"]
+            vals = d["values_in"]
+            val_str = ", ".join(
+                repr(v) if isinstance(v, str) else str(v)
+                for v in vals
+            )
+            items.append(
+                f"PARTITION {name} VALUES IN ({val_str})"
+            )
+        return "(" + ", ".join(items) + ")"
+
     def _build_create_table_sql(self, dimension: int) -> str:
         """Build the CREATE TABLE SQL with optional partition clause.
 
@@ -819,20 +915,17 @@ class PolarDBXVectorStore(VectorStore):
         ):
             index_extra = f" EF_CONSTRUCTION={self._ef_construction}"
 
-        base_params = {
-            "table_name": self._table_name,
-            "dimension": dimension,
-            "hnsw_m": self._hnsw_m,
-            "distance_function": self._distance_strategy.upper(),
-            "index_extra": index_extra,
-        }
-        if self._partition_by and self._partitions > 0:
-            return SQL_CREATE_TABLE_PARTITIONED.format(
-                **base_params,
-                partition_by=self._partition_by,
-                partitions=self._partitions,
-            )
-        return SQL_CREATE_TABLE.format(**base_params)
+        base_sql = SQL_CREATE_TABLE.format(
+            table_name=self._table_name,
+            dimension=dimension,
+            hnsw_m=self._hnsw_m,
+            distance_function=self._distance_strategy.upper(),
+            index_extra=index_extra,
+        )
+        partition_clause = self._build_partition_clause()
+        if partition_clause:
+            return base_sql.rstrip() + partition_clause
+        return base_sql
 
     def _detect_vector_index_name(self) -> Optional[str]:
         """Auto-detect the vector index name.

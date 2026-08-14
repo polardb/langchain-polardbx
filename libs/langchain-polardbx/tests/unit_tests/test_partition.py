@@ -1,0 +1,547 @@
+"""Unit tests for partition table enhancement (no database required).
+
+Covers:
+1. PolarDBXVectorStore._build_partition_clause() — all branches
+2. PolarDBXVectorStore._build_range_partition_defs() / _build_list_partition_defs()
+3. PolarDBXVectorStore constructor validation (invalid params, mutual exclusivity)
+4. sql._build_partition_clause() — standalone helper, all branches
+5. sql.create_partitioned_table() — DDL generation (mocked engine)
+6. sql.create_partitioned_table() — parameter validation
+"""
+
+from unittest.mock import patch, MagicMock
+
+import pytest
+
+from langchain_polardbx.vectorstores.polardbx import PolarDBXVectorStore
+from langchain_polardbx.sql import _build_partition_clause, create_partitioned_table
+
+
+# ---------------------------------------------------------------------------
+# Helpers — create a bare PolarDBXVectorStore without DB connection
+# ---------------------------------------------------------------------------
+
+def _make_store(**kwargs):
+    """Create a PolarDBXVectorStore instance without calling __init__."""
+    vs = PolarDBXVectorStore.__new__(PolarDBXVectorStore)
+    vs._partition_by = kwargs.get("partition_by")
+    vs._partitions = kwargs.get("partitions", 0)
+    vs._partition_column = kwargs.get("partition_column", "id")
+    vs._broadcast = kwargs.get("broadcast", False)
+    vs._locality = kwargs.get("locality")
+    vs._partition_defs = kwargs.get("partition_defs")
+    vs._hnsw_m = 6
+    vs._distance_strategy = "cosine"
+    vs._ef_construction = None
+    vs._capabilities = {}
+    vs._table_name = "test_table"
+    return vs
+
+
+# ===========================================================================
+# 1. VectorStore._build_partition_clause — all branches
+# ===========================================================================
+
+class TestVectorStorePartitionClause:
+    """Test PolarDBXVectorStore._build_partition_clause() output."""
+
+    def test_single_table_no_clause(self):
+        """Non-partitioned, non-broadcast → empty string."""
+        vs = _make_store()
+        assert vs._build_partition_clause() == ""
+
+    def test_hash_partition(self):
+        vs = _make_store(partition_by="HASH", partitions=8)
+        clause = vs._build_partition_clause()
+        assert "PARTITION BY HASH(id)" in clause
+        assert "PARTITIONS 8" in clause
+
+    def test_key_partition(self):
+        vs = _make_store(partition_by="KEY", partitions=4)
+        clause = vs._build_partition_clause()
+        assert "PARTITION BY KEY(id)" in clause
+        assert "PARTITIONS 4" in clause
+
+    def test_hash_partition_custom_column(self):
+        vs = _make_store(partition_by="HASH", partitions=8, partition_column="user_id")
+        clause = vs._build_partition_clause()
+        assert "PARTITION BY HASH(user_id)" in clause
+
+    def test_range_partition(self):
+        vs = _make_store(
+            partition_by="RANGE",
+            partition_column="amount",
+            partition_defs=[
+                {"name": "p0", "values_less_than": 1000},
+                {"name": "p1", "values_less_than": 2000},
+                {"name": "p2", "values_less_than": "MAXVALUE"},
+            ],
+        )
+        clause = vs._build_partition_clause()
+        assert "PARTITION BY RANGE(amount)" in clause
+        assert "PARTITION p0 VALUES LESS THAN (1000)" in clause
+        assert "PARTITION p1 VALUES LESS THAN (2000)" in clause
+        assert "PARTITION p2 VALUES LESS THAN (MAXVALUE)" in clause
+
+    def test_list_partition(self):
+        vs = _make_store(
+            partition_by="LIST",
+            partition_column="region",
+            partition_defs=[
+                {"name": "p0", "values_in": ["east", "west"]},
+                {"name": "p1", "values_in": ["north", "south"]},
+            ],
+        )
+        clause = vs._build_partition_clause()
+        assert "PARTITION BY LIST(region)" in clause
+        assert "PARTITION p0 VALUES IN ('east', 'west')" in clause
+        assert "PARTITION p1 VALUES IN ('north', 'south')" in clause
+
+    def test_broadcast(self):
+        vs = _make_store(broadcast=True)
+        clause = vs._build_partition_clause()
+        assert "BROADCAST" in clause
+        assert "PARTITION" not in clause
+
+    def test_locality_only(self):
+        """LOCALITY without partition → just LOCALITY clause."""
+        vs = _make_store(locality="dn=polardbx-storage-0-master")
+        clause = vs._build_partition_clause()
+        assert "LOCALITY='dn=polardbx-storage-0-master'" in clause
+
+    def test_hash_partition_with_locality(self):
+        """HASH partition + LOCALITY → both clauses."""
+        vs = _make_store(
+            partition_by="HASH", partitions=4, locality="dn=node-0"
+        )
+        clause = vs._build_partition_clause()
+        assert "PARTITION BY HASH(id)" in clause
+        assert "PARTITIONS 4" in clause
+        assert "LOCALITY='dn=node-0'" in clause
+
+    def test_broadcast_with_locality(self):
+        vs = _make_store(broadcast=True, locality="dn=node-0")
+        clause = vs._build_partition_clause()
+        assert "BROADCAST" in clause
+        assert "LOCALITY='dn=node-0'" in clause
+
+
+# ===========================================================================
+# 2. VectorStore._build_range_partition_defs / _build_list_partition_defs
+# ===========================================================================
+
+class TestVectorStorePartitionDefs:
+    """Test the internal partition definition builders."""
+
+    def test_range_defs_with_numeric_values(self):
+        vs = _make_store(
+            partition_by="RANGE",
+            partition_defs=[{"name": "p0", "values_less_than": 100}],
+        )
+        result = vs._build_range_partition_defs()
+        assert "PARTITION p0 VALUES LESS THAN (100)" in result
+
+    def test_range_defs_with_maxvalue(self):
+        vs = _make_store(
+            partition_by="RANGE",
+            partition_defs=[
+                {"name": "p0", "values_less_than": 100},
+                {"name": "p1", "values_less_than": "MAXVALUE"},
+            ],
+        )
+        result = vs._build_range_partition_defs()
+        assert "(MAXVALUE)" in result
+        assert "(100)" in result
+
+    def test_range_defs_missing_raises(self):
+        vs = _make_store(partition_by="RANGE", partition_defs=None)
+        with pytest.raises(ValueError, match="partition_defs required"):
+            vs._build_range_partition_defs()
+
+    def test_list_defs_with_strings(self):
+        vs = _make_store(
+            partition_by="LIST",
+            partition_defs=[{"name": "p0", "values_in": ["a", "b"]}],
+        )
+        result = vs._build_list_partition_defs()
+        assert "PARTITION p0 VALUES IN ('a', 'b')" in result
+
+    def test_list_defs_with_integers(self):
+        vs = _make_store(
+            partition_by="LIST",
+            partition_defs=[{"name": "p0", "values_in": [1, 2, 3]}],
+        )
+        result = vs._build_list_partition_defs()
+        assert "PARTITION p0 VALUES IN (1, 2, 3)" in result
+
+    def test_list_defs_missing_raises(self):
+        vs = _make_store(partition_by="LIST", partition_defs=None)
+        with pytest.raises(ValueError, match="partition_defs required"):
+            vs._build_list_partition_defs()
+
+
+# ===========================================================================
+# 3. VectorStore constructor validation
+# ===========================================================================
+
+class TestVectorStoreValidation:
+    """Test parameter validation in __init__ (without DB connection).
+
+    We test validation by mocking _detect_capabilities so __init__ doesn't
+    need a real DB.  We only check that invalid partition params raise the
+    correct errors before any DB connection is attempted.
+    """
+
+    def test_invalid_partition_by_raises(self):
+        """Invalid partition_by value raises ValueError."""
+        with pytest.raises(ValueError, match="Invalid partition_by"):
+            PolarDBXVectorStore(
+                host="localhost", port=3306, user="u", password="p",
+                database="db", embedding=MagicMock(),
+                table_name="t", partition_by="INVALID",
+            )
+
+    def test_hash_without_partitions_raises(self):
+        """HASH partition without partitions > 0 raises ValueError."""
+        with pytest.raises(ValueError, match="partitions must be > 0"):
+            PolarDBXVectorStore(
+                host="localhost", port=3306, user="u", password="p",
+                database="db", embedding=MagicMock(),
+                table_name="t", partition_by="HASH", partitions=0,
+            )
+
+    def test_range_without_defs_raises(self):
+        """RANGE partition without partition_defs raises ValueError."""
+        with pytest.raises(ValueError, match="partition_defs must be provided"):
+            PolarDBXVectorStore(
+                host="localhost", port=3306, user="u", password="p",
+                database="db", embedding=MagicMock(),
+                table_name="t", partition_by="RANGE",
+            )
+
+    def test_list_without_defs_raises(self):
+        """LIST partition without partition_defs raises ValueError."""
+        with pytest.raises(ValueError, match="partition_defs must be provided"):
+            PolarDBXVectorStore(
+                host="localhost", port=3306, user="u", password="p",
+                database="db", embedding=MagicMock(),
+                table_name="t", partition_by="LIST",
+            )
+
+    def test_broadcast_and_partition_mutually_exclusive(self):
+        """broadcast=True and partition_by set together raises ValueError."""
+        with pytest.raises(ValueError, match="mutually exclusive"):
+            PolarDBXVectorStore(
+                host="localhost", port=3306, user="u", password="p",
+                database="db", embedding=MagicMock(),
+                table_name="t", broadcast=True, partition_by="HASH",
+                partitions=4,
+            )
+
+
+# ===========================================================================
+# 4. sql._build_partition_clause — standalone helper, all branches
+# ===========================================================================
+
+class TestSqlBuildPartitionClause:
+    """Test the standalone _build_partition_clause() in sql.py."""
+
+    def test_no_partition_returns_empty(self):
+        assert _build_partition_clause() == ""
+
+    def test_hash(self):
+        clause = _build_partition_clause(
+            partition_by="HASH", partition_column="id", partitions=8
+        )
+        assert "PARTITION BY HASH(id)" in clause
+        assert "PARTITIONS 8" in clause
+
+    def test_key(self):
+        clause = _build_partition_clause(
+            partition_by="KEY", partition_column="uid", partitions=4
+        )
+        assert "PARTITION BY KEY(uid)" in clause
+        assert "PARTITIONS 4" in clause
+
+    def test_range(self):
+        clause = _build_partition_clause(
+            partition_by="RANGE",
+            partition_column="amount",
+            partition_defs=[
+                {"name": "p0", "values_less_than": 1000},
+                {"name": "p1", "values_less_than": "MAXVALUE"},
+            ],
+        )
+        assert "PARTITION BY RANGE(amount)" in clause
+        assert "PARTITION p0 VALUES LESS THAN (1000)" in clause
+        assert "PARTITION p1 VALUES LESS THAN (MAXVALUE)" in clause
+
+    def test_list(self):
+        clause = _build_partition_clause(
+            partition_by="LIST",
+            partition_column="region",
+            partition_defs=[
+                {"name": "p0", "values_in": ["east", "west"]},
+                {"name": "p1", "values_in": ["north", "south"]},
+            ],
+        )
+        assert "PARTITION BY LIST(region)" in clause
+        assert "PARTITION p0 VALUES IN ('east', 'west')" in clause
+        assert "PARTITION p1 VALUES IN ('north', 'south')" in clause
+
+    def test_broadcast(self):
+        clause = _build_partition_clause(broadcast=True)
+        assert "BROADCAST" in clause
+        assert "PARTITION" not in clause
+
+    def test_locality(self):
+        clause = _build_partition_clause(locality="dn=node-0")
+        assert "LOCALITY='dn=node-0'" in clause
+
+    def test_hash_with_locality(self):
+        clause = _build_partition_clause(
+            partition_by="HASH", partitions=4, locality="dn=node-0"
+        )
+        assert "PARTITION BY HASH(id)" in clause
+        assert "PARTITIONS 4" in clause
+        assert "LOCALITY='dn=node-0'" in clause
+
+    def test_broadcast_takes_precedence_over_partition(self):
+        """When broadcast=True, partition_by is ignored."""
+        clause = _build_partition_clause(
+            broadcast=True, partition_by="HASH", partitions=4
+        )
+        assert "BROADCAST" in clause
+        assert "PARTITION BY" not in clause
+
+    def test_lowercase_partition_by(self):
+        """partition_by is case-insensitive."""
+        clause = _build_partition_clause(
+            partition_by="hash", partitions=4
+        )
+        assert "PARTITION BY HASH(id)" in clause
+
+
+# ===========================================================================
+# 5. sql.create_partitioned_table — DDL generation (mocked engine)
+# ===========================================================================
+
+class TestCreatePartitionedTableDDL:
+    """Test that create_partitioned_table generates correct DDL.
+
+    We mock create_engine so no real DB connection is made.
+    """
+
+    def test_hash_table_ddl(self):
+        captured_ddl = []
+
+        def fake_create_engine(uri):
+            conn = MagicMock()
+            conn.execute.side_effect = lambda stmt: captured_ddl.append(stmt.text)
+            conn.commit.return_value = None
+            engine = MagicMock()
+            engine.connect.return_value.__enter__ = lambda s: conn
+            engine.connect.return_value.__exit__ = lambda *a: None
+            engine.dispose.return_value = None
+            return engine
+
+        with patch("sqlalchemy.create_engine", side_effect=fake_create_engine):
+            create_partitioned_table(
+                uri="mysql+pymysql://u:p@host:3306/db",
+                table_name="orders",
+                columns=["id BIGINT", "amount DECIMAL(10,2)"],
+                partition_by="HASH",
+                partition_column="user_id",
+                partitions=8,
+            )
+
+        assert len(captured_ddl) == 1
+        ddl = captured_ddl[0]
+        assert "CREATE TABLE IF NOT EXISTS `orders`" in ddl
+        assert "id BIGINT" in ddl
+        assert "PARTITION BY HASH(user_id)" in ddl
+        assert "PARTITIONS 8" in ddl
+
+    def test_broadcast_table_ddl(self):
+        captured_ddl = []
+
+        def fake_create_engine(uri):
+            conn = MagicMock()
+            conn.execute.side_effect = lambda stmt: captured_ddl.append(stmt.text)
+            conn.commit.return_value = None
+            engine = MagicMock()
+            engine.connect.return_value.__enter__ = lambda s: conn
+            engine.connect.return_value.__exit__ = lambda *a: None
+            engine.dispose.return_value = None
+            return engine
+
+        with patch("sqlalchemy.create_engine", side_effect=fake_create_engine):
+            create_partitioned_table(
+                uri="mysql+pymysql://u:p@host:3306/db",
+                table_name="dim_table",
+                columns=["id INT", "code VARCHAR(50)"],
+                broadcast=True,
+            )
+
+        ddl = captured_ddl[0]
+        assert "CREATE TABLE IF NOT EXISTS `dim_table`" in ddl
+        assert "BROADCAST" in ddl
+        assert "PARTITION" not in ddl
+
+    def test_range_table_ddl(self):
+        captured_ddl = []
+
+        def fake_create_engine(uri):
+            conn = MagicMock()
+            conn.execute.side_effect = lambda stmt: captured_ddl.append(stmt.text)
+            conn.commit.return_value = None
+            engine = MagicMock()
+            engine.connect.return_value.__enter__ = lambda s: conn
+            engine.connect.return_value.__exit__ = lambda *a: None
+            engine.dispose.return_value = None
+            return engine
+
+        with patch("sqlalchemy.create_engine", side_effect=fake_create_engine):
+            create_partitioned_table(
+                uri="mysql+pymysql://u:p@host:3306/db",
+                table_name="logs",
+                columns=["id BIGINT", "ts DATETIME"],
+                partition_by="RANGE",
+                partition_column="id",
+                partition_defs=[
+                    {"name": "p0", "values_less_than": 1000},
+                    {"name": "p1", "values_less_than": "MAXVALUE"},
+                ],
+            )
+
+        ddl = captured_ddl[0]
+        assert "PARTITION BY RANGE(id)" in ddl
+        assert "PARTITION p0 VALUES LESS THAN (1000)" in ddl
+        assert "PARTITION p1 VALUES LESS THAN (MAXVALUE)" in ddl
+
+    def test_uri_auto_swap_mysql_pymysql(self):
+        """mysql+pymysql:// → polardbx+pymysql://."""
+        captured_uri = []
+
+        def fake_create_engine(uri):
+            captured_uri.append(uri)
+            engine = MagicMock()
+            conn = MagicMock()
+            conn.execute.return_value = None
+            conn.commit.return_value = None
+            engine.connect.return_value.__enter__ = lambda s: conn
+            engine.connect.return_value.__exit__ = lambda *a: None
+            engine.dispose.return_value = None
+            return engine
+
+        with patch("sqlalchemy.create_engine", side_effect=fake_create_engine):
+            create_partitioned_table(
+                uri="mysql+pymysql://u:p@host:3306/db",
+                table_name="t",
+                columns=["id INT"],
+            )
+
+        assert captured_uri[0].startswith("polardbx+pymysql://")
+
+    def test_uri_auto_swap_mysql_plain(self):
+        """mysql:// → polardbx+pymysql://."""
+        captured_uri = []
+
+        def fake_create_engine(uri):
+            captured_uri.append(uri)
+            engine = MagicMock()
+            conn = MagicMock()
+            conn.execute.return_value = None
+            conn.commit.return_value = None
+            engine.connect.return_value.__enter__ = lambda s: conn
+            engine.connect.return_value.__exit__ = lambda *a: None
+            engine.dispose.return_value = None
+            return engine
+
+        with patch("sqlalchemy.create_engine", side_effect=fake_create_engine):
+            create_partitioned_table(
+                uri="mysql://u:p@host:3306/db",
+                table_name="t",
+                columns=["id INT"],
+            )
+
+        assert captured_uri[0].startswith("polardbx+pymysql://")
+
+    def test_if_not_exists_false(self):
+        captured_ddl = []
+
+        def fake_create_engine(uri):
+            conn = MagicMock()
+            conn.execute.side_effect = lambda stmt: captured_ddl.append(stmt.text)
+            conn.commit.return_value = None
+            engine = MagicMock()
+            engine.connect.return_value.__enter__ = lambda s: conn
+            engine.connect.return_value.__exit__ = lambda *a: None
+            engine.dispose.return_value = None
+            return engine
+
+        with patch("sqlalchemy.create_engine", side_effect=fake_create_engine):
+            create_partitioned_table(
+                uri="mysql+pymysql://u:p@host:3306/db",
+                table_name="t",
+                columns=["id INT"],
+                if_not_exists=False,
+            )
+
+        assert "IF NOT EXISTS" not in captured_ddl[0]
+
+
+# ===========================================================================
+# 6. sql.create_partitioned_table — parameter validation
+# ===========================================================================
+
+class TestCreatePartitionedTableValidation:
+    """Test that create_partitioned_table validates params before executing."""
+
+    def test_invalid_partition_by_raises(self):
+        with pytest.raises(ValueError, match="Invalid partition_by"):
+            create_partitioned_table(
+                uri="mysql://u:p@h:3306/db",
+                table_name="t",
+                columns=["id INT"],
+                partition_by="INVALID",
+            )
+
+    def test_hash_without_partitions_raises(self):
+        with pytest.raises(ValueError, match="partitions must be > 0"):
+            create_partitioned_table(
+                uri="mysql://u:p@h:3306/db",
+                table_name="t",
+                columns=["id INT"],
+                partition_by="HASH",
+                partitions=0,
+            )
+
+    def test_range_without_defs_raises(self):
+        with pytest.raises(ValueError, match="partition_defs required"):
+            create_partitioned_table(
+                uri="mysql://u:p@h:3306/db",
+                table_name="t",
+                columns=["id INT"],
+                partition_by="RANGE",
+            )
+
+    def test_list_without_defs_raises(self):
+        with pytest.raises(ValueError, match="partition_defs required"):
+            create_partitioned_table(
+                uri="mysql://u:p@h:3306/db",
+                table_name="t",
+                columns=["id INT"],
+                partition_by="LIST",
+            )
+
+    def test_broadcast_and_partition_raises(self):
+        with pytest.raises(ValueError, match="mutually exclusive"):
+            create_partitioned_table(
+                uri="mysql://u:p@h:3306/db",
+                table_name="t",
+                columns=["id INT"],
+                broadcast=True,
+                partition_by="HASH",
+                partitions=4,
+            )

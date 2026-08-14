@@ -34,6 +34,9 @@ DB_USER = _uri.username or "root"
 DB_PASS = _uri.password or ""
 DB_NAME = _uri.path.lstrip("/") or "test"
 
+# DN node name for LOCALITY tests (instance-specific)
+DN_NODE = os.environ.get("POLARDBX_DN_NODE", "")
+
 
 # ---- Fake embeddings ----
 
