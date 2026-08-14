@@ -7,9 +7,10 @@ from urllib.parse import urlparse
 import numpy as np
 from langchain_core.embeddings import Embeddings
 
-from langchain_polardbx import NotSupportedError, PolarDBXVectorStore
+from langchain_polardbx import PolarDBXVectorStore
 
 # ---- .env loading (search upward from this file) ----
+
 
 def _load_dotenv():
     d = os.path.dirname(os.path.abspath(__file__))
@@ -24,6 +25,7 @@ def _load_dotenv():
                         os.environ.setdefault(k.strip(), v.strip())
             return
         d = os.path.dirname(d)
+
 
 _load_dotenv()
 
@@ -40,6 +42,7 @@ DN_NODE = os.environ.get("POLARDBX_DN_NODE", "")
 
 # ---- Fake embeddings ----
 
+
 class FakeEmbeddings(Embeddings):
     """Deterministic embedding using MD5 hash — same text always yields same vector."""
 
@@ -48,7 +51,7 @@ class FakeEmbeddings(Embeddings):
 
     def _embed(self, text: str) -> list[float]:
         h = hashlib.md5(text.encode()).digest()
-        vec = np.frombuffer(h * (self.dim // 16 + 1), dtype=np.uint8)[:self.dim]
+        vec = np.frombuffer(h * (self.dim // 16 + 1), dtype=np.uint8)[: self.dim]
         return (vec / 255.0).tolist()
 
     def embed_query(self, text: str) -> list[float]:
@@ -81,6 +84,7 @@ METADATAS = [
 
 # ---- Store factory ----
 
+
 def make_store(
     table_name: str = "test_polardbx_langchain",
     distance_strategy: str = "cosine",
@@ -88,9 +92,15 @@ def make_store(
     **kwargs,
 ) -> PolarDBXVectorStore:
     return PolarDBXVectorStore(
-        host=DB_HOST, port=DB_PORT, user=DB_USER, password=DB_PASS,
-        database=DB_NAME, embedding=EMB, table_name=table_name,
-        distance_strategy=distance_strategy, pre_delete_table=pre_delete,
+        host=DB_HOST,
+        port=DB_PORT,
+        user=DB_USER,
+        password=DB_PASS,
+        database=DB_NAME,
+        embedding=EMB,
+        table_name=table_name,
+        distance_strategy=distance_strategy,
+        pre_delete_table=pre_delete,
         **kwargs,
     )
 

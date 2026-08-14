@@ -15,6 +15,7 @@ def _setup(vs):
 
 # ==================== SYNC ====================
 
+
 def test_sync():
     vs = make_store()
     _setup(vs)
@@ -71,6 +72,7 @@ def test_sync():
 
 # ==================== ASYNC ====================
 
+
 async def test_async():
     vs = make_store()
     await vs.aadd_texts(TEXTS, metadatas=METADATAS)
@@ -114,6 +116,7 @@ async def test_async():
 
 
 # ==================== IGNORE INDEX search_type ====================
+
 
 def test_ignore_index_search():
     """search_type='ignore' should use IGNORE INDEX hint — works on both versions."""

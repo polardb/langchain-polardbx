@@ -53,7 +53,6 @@ def test_dialect_driver_is_pymysql() -> None:
 
 def test_ddl_fix_tab_indentation() -> None:
     """Test that tab indentation is normalized to two-space indentation."""
-    from langchain_polardbx.sql import PolarDBXTableDefinitionParser
 
     # Simulate PolarDB-X DDL with tab indentation
     ddl_polardbx = (
@@ -78,7 +77,6 @@ def test_ddl_fix_tab_indentation() -> None:
 
 def test_ddl_fix_enum_spacing() -> None:
     """Test that ENUM value spacing is normalized."""
-    from langchain_polardbx.sql import PolarDBXTableDefinitionParser
 
     # PolarDB-X puts spaces after commas in ENUM: enum('A', 'B')
     # Standard MySQL has no spaces: enum('A','B')
@@ -101,7 +99,6 @@ def test_ddl_fix_enum_spacing() -> None:
 
 def test_ddl_fix_both_tab_and_enum() -> None:
     """Test that both tab indentation and ENUM spacing are fixed together."""
-    from langchain_polardbx.sql import PolarDBXTableDefinitionParser
 
     ddl_polardbx = (
         "CREATE TABLE `users` (\n"
@@ -126,7 +123,6 @@ def test_ddl_fix_both_tab_and_enum() -> None:
 
 def test_ddl_passthrough_standard_mysql() -> None:
     """Test that standard MySQL DDL (no tab, no ENUM spacing) is passed through."""
-    from langchain_polardbx.sql import PolarDBXTableDefinitionParser
 
     ddl_standard = (
         "CREATE TABLE `test` (\n"
@@ -180,9 +176,7 @@ def test_from_uri_keeps_polardbx_uri() -> None:
     with patch.object(
         PolarDBXSQLDatabase.__mro__[1], "from_uri", return_value="mock_db"
     ) as mock_from_uri:
-        PolarDBXSQLDatabase.from_uri(
-            "polardbx+pymysql://user:pass@host:3306/db"
-        )
+        PolarDBXSQLDatabase.from_uri("polardbx+pymysql://user:pass@host:3306/db")
 
         actual_uri = mock_from_uri.call_args[0][0]
         assert actual_uri == "polardbx+pymysql://user:pass@host:3306/db"
@@ -266,8 +260,8 @@ def test_create_engine_standard_mysql_unaffected() -> None:
 
 def _create_parser():
     """Create a PolarDBXTableDefinitionParser instance for testing."""
+
     from langchain_polardbx.sql import PolarDBXDialect, PolarDBXTableDefinitionParser
-    from sqlalchemy.dialects.mysql.reflection import MySQLTableDefinitionParser
 
     dialect = PolarDBXDialect()
     preparer = dialect.identifier_preparer

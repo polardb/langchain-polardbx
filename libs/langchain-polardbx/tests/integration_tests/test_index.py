@@ -19,6 +19,7 @@ def _drop_existing_vi(vs):
 
 # ==================== SYNC ====================
 
+
 def test_sync():
     vs = make_store()
     vs.add_texts(TEXTS, metadatas=METADATAS)
@@ -74,6 +75,7 @@ def test_sync():
 
 # ==================== ASYNC ====================
 
+
 async def test_async():
     vs = make_store()
     await vs.aadd_texts(TEXTS, metadatas=METADATAS)
@@ -119,6 +121,7 @@ async def test_async():
 
 # ==================== ENHANCED: ef_search boundary values ====================
 
+
 def test_ef_search_boundary():
     """ef_search at extreme values — 1 (minimum) and 10000 (very large)."""
     vs = make_store(table_name="test_lc_idx_efbd")
@@ -149,6 +152,7 @@ def test_ef_search_boundary():
 
 # ==================== ENHANCED: drop_vector_index auto-detect ====================
 
+
 def test_drop_vector_index_auto_detect():
     """drop_vector_index without index_name should auto-detect the existing index."""
     vs = make_store(table_name="test_lc_idx_autodrop")
@@ -178,6 +182,7 @@ def test_drop_vector_index_auto_detect():
 
 
 # ==================== ENHANCED: apply_vector_index with different M values ====================
+
 
 def test_apply_vector_index_variants():
     """apply_vector_index with different M values and distance strategies."""
@@ -223,6 +228,7 @@ def test_apply_vector_index_variants():
 
 # ==================== v3: EF_CONSTRUCTION in CREATE TABLE DDL ====================
 
+
 def test_ef_construction_in_ddl():
     """ef_construction parameter should appear in CREATE TABLE DDL on v3,
     and be silently ignored on old versions."""
@@ -248,6 +254,7 @@ def test_ef_construction_in_ddl():
 
 # ==================== v3: EF_CONSTRUCTION in apply_vector_index ====================
 
+
 def test_apply_vector_index_with_ef_construction():
     """apply_vector_index should accept ef_construction on v3,
     and silently ignore it on old versions."""
@@ -272,6 +279,7 @@ def test_apply_vector_index_with_ef_construction():
 
 # ==================== v3: VECTOR_INDEXES view for index detection ====================
 
+
 def test_detect_vector_index_name():
     """_detect_vector_index_name should find the index via VECTOR_INDEXES
     view on v3, or via SHOW CREATE TABLE regex on old versions."""
@@ -288,6 +296,7 @@ def test_detect_vector_index_name():
 
 
 # ==================== v3: preload_index / preload_check ====================
+
 
 def test_preload_index():
     """preload_index should succeed on v3, raise NotSupportedError on old."""
@@ -332,6 +341,7 @@ def test_preload_check():
 
 # ==================== v3: explain_index_health ====================
 
+
 def test_explain_index_health():
     """explain_index_health should return metadata on v3, raise NotSupportedError on old."""
     from _helpers import NotSupportedError
@@ -356,6 +366,7 @@ def test_explain_index_health():
 
 
 # ==================== v3: async preload / explain_index_health ====================
+
 
 async def test_async_preload_and_health():
     """Async preload_index/preload_check/explain_index_health on v3,

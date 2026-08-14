@@ -22,6 +22,7 @@ from langchain_polardbx import PolarDBXVectorStore
 
 # ==================== SYNC ====================
 
+
 def test_sync():
     vs = make_store()
 
@@ -30,14 +31,21 @@ def test_sync():
     assert len(ids) == 5
 
     # add_documents
-    docs = [Document(page_content="Java is also popular", metadata={"category": "language", "lang": "en"})]
+    docs = [
+        Document(
+            page_content="Java is also popular",
+            metadata={"category": "language", "lang": "en"},
+        )
+    ]
     doc_ids = vs.add_documents(docs)
     assert len(doc_ids) == 1
     assert vs.count() == 6
 
     # add_embeddings
     emb_pairs = [("Go is concise", EMB.embed_query("Go is concise"))]
-    emb_ids = vs.add_embeddings(emb_pairs, metadatas=[{"category": "language", "lang": "en"}])
+    emb_ids = vs.add_embeddings(
+        emb_pairs, metadatas=[{"category": "language", "lang": "en"}]
+    )
     assert len(emb_ids) == 1
     assert vs.count() == 7
 
@@ -56,7 +64,15 @@ def test_sync():
     assert len(docs) == 2
 
     # upsert
-    vs.upsert([Document(page_content="UPDATED text", metadata={"category": "updated", "lang": "en"})], ids=[ids[0]])
+    vs.upsert(
+        [
+            Document(
+                page_content="UPDATED text",
+                metadata={"category": "updated", "lang": "en"},
+            )
+        ],
+        ids=[ids[0]],
+    )
     docs = vs.get_by_ids([ids[0]])
     assert docs[0].page_content == "UPDATED text"
     assert docs[0].metadata["category"] == "updated"
@@ -78,20 +94,34 @@ def test_sync():
     # from_texts
     vs.drop_table()
     vs2 = PolarDBXVectorStore.from_texts(
-        TEXTS[:3], EMB,
-        host=DB_HOST, port=DB_PORT, user=DB_USER, password=DB_PASS,
-        database=DB_NAME, table_name="test_polardbx_langchain", pre_delete_table=True,
+        TEXTS[:3],
+        EMB,
+        host=DB_HOST,
+        port=DB_PORT,
+        user=DB_USER,
+        password=DB_PASS,
+        database=DB_NAME,
+        table_name="test_polardbx_langchain",
+        pre_delete_table=True,
     )
     assert vs2.count() == 3
     vs2.drop_table()
     vs2.close()
 
     # from_documents
-    docs = [Document(page_content=t, metadata=m) for t, m in zip(TEXTS[:3], METADATAS[:3])]
+    docs = [
+        Document(page_content=t, metadata=m) for t, m in zip(TEXTS[:3], METADATAS[:3])
+    ]
     vs3 = PolarDBXVectorStore.from_documents(
-        docs, EMB,
-        host=DB_HOST, port=DB_PORT, user=DB_USER, password=DB_PASS,
-        database=DB_NAME, table_name="test_polardbx_langchain", pre_delete_table=True,
+        docs,
+        EMB,
+        host=DB_HOST,
+        port=DB_PORT,
+        user=DB_USER,
+        password=DB_PASS,
+        database=DB_NAME,
+        table_name="test_polardbx_langchain",
+        pre_delete_table=True,
     )
     assert vs3.count() == 3
     vs3.drop_table()
@@ -106,6 +136,7 @@ def test_sync():
 
 # ==================== ASYNC ====================
 
+
 async def test_async():
     vs = make_store()
 
@@ -114,13 +145,20 @@ async def test_async():
     assert len(ids) == 5
 
     # aadd_documents
-    docs = [Document(page_content="Java is also popular", metadata={"category": "language", "lang": "en"})]
+    docs = [
+        Document(
+            page_content="Java is also popular",
+            metadata={"category": "language", "lang": "en"},
+        )
+    ]
     doc_ids = await vs.aadd_documents(docs)
     assert len(doc_ids) == 1
 
     # aadd_embeddings
     emb_pairs = [("Go is concise", EMB.embed_query("Go is concise"))]
-    emb_ids = await vs.aadd_embeddings(emb_pairs, metadatas=[{"category": "language", "lang": "en"}])
+    emb_ids = await vs.aadd_embeddings(
+        emb_pairs, metadatas=[{"category": "language", "lang": "en"}]
+    )
     assert len(emb_ids) == 1
 
     # acount
@@ -132,7 +170,15 @@ async def test_async():
     assert len(docs) == 2
 
     # aupsert
-    await vs.aupsert([Document(page_content="ASYNC UPDATED", metadata={"category": "updated", "lang": "en"})], ids=[ids[0]])
+    await vs.aupsert(
+        [
+            Document(
+                page_content="ASYNC UPDATED",
+                metadata={"category": "updated", "lang": "en"},
+            )
+        ],
+        ids=[ids[0]],
+    )
     docs = await vs.aget_by_ids([ids[0]])
     assert docs[0].page_content == "ASYNC UPDATED"
 
@@ -147,20 +193,34 @@ async def test_async():
 
     # afrom_texts
     vs2 = await PolarDBXVectorStore.afrom_texts(
-        TEXTS[:3], EMB,
-        host=DB_HOST, port=DB_PORT, user=DB_USER, password=DB_PASS,
-        database=DB_NAME, table_name="test_polardbx_langchain", pre_delete_table=True,
+        TEXTS[:3],
+        EMB,
+        host=DB_HOST,
+        port=DB_PORT,
+        user=DB_USER,
+        password=DB_PASS,
+        database=DB_NAME,
+        table_name="test_polardbx_langchain",
+        pre_delete_table=True,
     )
     assert vs2.count() == 3
     vs2.drop_table()
     vs2.close()
 
     # afrom_documents
-    docs = [Document(page_content=t, metadata=m) for t, m in zip(TEXTS[:3], METADATAS[:3])]
+    docs = [
+        Document(page_content=t, metadata=m) for t, m in zip(TEXTS[:3], METADATAS[:3])
+    ]
     vs3 = await PolarDBXVectorStore.afrom_documents(
-        docs, EMB,
-        host=DB_HOST, port=DB_PORT, user=DB_USER, password=DB_PASS,
-        database=DB_NAME, table_name="test_polardbx_langchain", pre_delete_table=True,
+        docs,
+        EMB,
+        host=DB_HOST,
+        port=DB_PORT,
+        user=DB_USER,
+        password=DB_PASS,
+        database=DB_NAME,
+        table_name="test_polardbx_langchain",
+        pre_delete_table=True,
     )
     assert vs3.count() == 3
     vs3.drop_table()
@@ -172,6 +232,7 @@ async def test_async():
 
 
 # ==================== BULK UPSERT (sync) ====================
+
 
 def test_bulk_upsert():
     """bulk_upsert with pre-computed embeddings — works on both v3 and old."""
@@ -207,6 +268,7 @@ def test_bulk_upsert():
 
 
 # ==================== BULK UPSERT (async) ====================
+
 
 async def test_abulk_upsert():
     """abulk_upsert with pre-computed embeddings — works on both v3 and old."""

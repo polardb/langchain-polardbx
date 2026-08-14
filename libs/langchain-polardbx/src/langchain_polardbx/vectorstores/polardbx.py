@@ -434,7 +434,8 @@ class PolarDBXVectorStore(VectorStore):
             )
         if len(name) > 64:
             raise ValueError(
-                f"{label.capitalize()} too long: {name}. Maximum length is 64 characters."
+                f"{label.capitalize()} too long: {name}. "
+                "Maximum length is 64 characters."
             )
         return name
 
@@ -996,7 +997,8 @@ class PolarDBXVectorStore(VectorStore):
         """Drop a vector index.
 
         Args:
-            index_name: Name of the index to drop. If None, uses the detected/stored name.
+            index_name: Name of the index to drop. If None,
+                uses the detected/stored name.
         """
         name = index_name or self._detect_vector_index_name()
         if not name:
@@ -2360,11 +2362,13 @@ class PolarDBXVectorStore(VectorStore):
             **kwargs: Additional keyword arguments:
                 - ef_search: int — HNSW ef_search parameter [1, 10000].
                   Higher = more accurate but slower. Default: None (server default 20).
-                - search_type: str — "ann" (force vector index), "knn" (force full scan),
+                - search_type: str — "ann" (force vector index),
+                  "knn" (force full scan),
                   or "auto" (let optimizer decide). Default: "auto".
 
         Returns:
-            List of tuples of (Document, distance_score). Lower distance means more similar.
+            List of tuples of (Document, distance_score).
+            Lower distance means more similar.
         """
         # Extract Phase 2 enhancement params
         ef_search = kwargs.pop("ef_search", None)
@@ -2526,7 +2530,8 @@ class PolarDBXVectorStore(VectorStore):
                 - search_type: str — "ann", "knn", or "auto". Default: "auto".
 
         Returns:
-            List of tuples of (Document, distance_score). Lower distance means more similar.
+            List of tuples of (Document, distance_score).
+            Lower distance means more similar.
         """
         # Extract Phase 2 enhancement params
         ef_search = kwargs.pop("ef_search", None)

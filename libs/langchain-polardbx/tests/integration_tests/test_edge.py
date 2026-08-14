@@ -9,6 +9,7 @@ from _helpers import EMB, METADATAS, TEXTS, FakeEmbeddings, is_v3, make_store
 
 # ==================== 1. Euclidean distance strategy ====================
 
+
 def test_euclidean():
     vs = make_store(table_name="test_lc_euclidean", distance_strategy="euclidean")
     vs.add_texts(TEXTS, metadatas=METADATAS)
@@ -33,12 +34,16 @@ def test_euclidean():
 
 # ==================== 2. Filter operators ====================
 
+
 def test_filter_operators():
     vs = make_store(table_name="test_lc_filters")
     vs.add_texts(TEXTS, metadatas=METADATAS)
     vs.add_texts(
         ["Rust is fast", "Go is concurrent"],
-        metadatas=[{"category": "language", "score": 50}, {"category": "language", "score": 90}],
+        metadatas=[
+            {"category": "language", "score": 50},
+            {"category": "language", "score": 90},
+        ],
     )
 
     # $eq
@@ -66,11 +71,15 @@ def test_filter_operators():
     assert all(d.metadata.get("score", 999) <= 90 for d in r)
 
     # $in
-    r = vs.similarity_search("language", k=10, filter={"category": {"$in": ["database", "search"]}})
+    r = vs.similarity_search(
+        "language", k=10, filter={"category": {"$in": ["database", "search"]}}
+    )
     assert all(d.metadata.get("category") in ["database", "search"] for d in r)
 
     # $nin
-    r = vs.similarity_search("language", k=10, filter={"category": {"$nin": ["database", "search"]}})
+    r = vs.similarity_search(
+        "language", k=10, filter={"category": {"$nin": ["database", "search"]}}
+    )
     assert all(d.metadata.get("category") not in ["database", "search"] for d in r)
 
     # $like
@@ -78,8 +87,13 @@ def test_filter_operators():
     assert all(d.metadata.get("category", "").startswith("lang") for d in r)
 
     # Multi-condition (AND)
-    r = vs.similarity_search("language", k=10, filter={"category": "language", "score": {"$gt": 60}})
-    assert all(d.metadata.get("category") == "language" and d.metadata.get("score", 0) > 60 for d in r)
+    r = vs.similarity_search(
+        "language", k=10, filter={"category": "language", "score": {"$gt": 60}}
+    )
+    assert all(
+        d.metadata.get("category") == "language" and d.metadata.get("score", 0) > 60
+        for d in r
+    )
 
     # Filter on non-existent key
     r = vs.similarity_search("language", k=10, filter={"nonexistent_key": "value"})
@@ -90,6 +104,7 @@ def test_filter_operators():
 
 
 # ==================== 3. score_threshold ====================
+
 
 def test_score_threshold():
     vs = make_store(table_name="test_lc_threshold")
@@ -105,12 +120,16 @@ def test_score_threshold():
     # distance <= threshold are returned (lower distance = more similar).
 
     # With high threshold (0.99) — allows most results (distance <= 0.99)
-    results_high = vs.similarity_search_with_score_by_vector(vec, k=5, score_threshold=0.99)
+    results_high = vs.similarity_search_with_score_by_vector(
+        vec, k=5, score_threshold=0.99
+    )
     assert len(results_high) <= 5
 
     # With low threshold (0.0) — only exact matches (distance <= 0.0)
     # should return 0 for non-identical vectors
-    results_low = vs.similarity_search_with_score_by_vector(vec, k=5, score_threshold=0.0)
+    results_low = vs.similarity_search_with_score_by_vector(
+        vec, k=5, score_threshold=0.0
+    )
     assert len(results_low) == 0
 
     # High threshold should return >= low threshold
@@ -125,6 +144,7 @@ def test_score_threshold():
 
 
 # ==================== 4. Empty table search ====================
+
 
 def test_empty_table():
     vs = make_store(table_name="test_lc_empty")
@@ -142,6 +162,7 @@ def test_empty_table():
 
 # ==================== 5. k > data count ====================
 
+
 def test_k_exceeds_data():
     vs = make_store(table_name="test_lc_kexceed")
     vs.add_texts(TEXTS[:3], metadatas=METADATAS[:3])  # only 3 docs
@@ -154,6 +175,7 @@ def test_k_exceeds_data():
 
 
 # ==================== 6. metadata=None ====================
+
 
 def test_metadata_none():
     vs = make_store(table_name="test_lc_metanone")
@@ -170,6 +192,7 @@ def test_metadata_none():
 
 
 # ==================== 7. Special characters / SQL injection ====================
+
 
 def test_special_chars():
     vs = make_store(table_name="test_lc_special")
@@ -200,6 +223,7 @@ def test_special_chars():
 
 # ==================== 8. Duplicate ID upsert via add_texts ====================
 
+
 def test_duplicate_id():
     vs = make_store(table_name="test_lc_dup")
     ids1 = vs.add_texts(TEXTS[:3], metadatas=METADATAS[:3])
@@ -222,6 +246,7 @@ def test_duplicate_id():
 
 
 # ==================== 9. Large / nested metadata ====================
+
 
 def test_large_metadata():
     vs = make_store(table_name="test_lc_bigmeta")
@@ -257,6 +282,7 @@ def test_large_metadata():
 
 # ==================== 10. Data persistence across store instances ====================
 
+
 def test_persistence():
     vs1 = make_store(table_name="test_lc_persist", pre_delete=True)
     vs1.add_texts(TEXTS[:3], metadatas=METADATAS[:3])
@@ -277,6 +303,7 @@ def test_persistence():
 
 # ==================== 11. INNER_PRODUCT distance strategy (v3) ====================
 
+
 def test_inner_product():
     """inner_product distance strategy requires v3 VEC_DISTANCE support.
     On old versions, initialization should raise NotSupportedError."""
@@ -288,7 +315,9 @@ def test_inner_product():
 
     if v3:
         # v3: inner_product should work end-to-end
-        vs = make_store(table_name="test_lc_innerprod", distance_strategy="inner_product")
+        vs = make_store(
+            table_name="test_lc_innerprod", distance_strategy="inner_product"
+        )
         vs.add_texts(TEXTS, metadatas=METADATAS)
 
         results = vs.similarity_search("database", k=3)
@@ -307,13 +336,16 @@ def test_inner_product():
     else:
         # Old version: should reject inner_product at init time
         try:
-            vs = make_store(table_name="test_lc_innerprod", distance_strategy="inner_product")
+            vs = make_store(
+                table_name="test_lc_innerprod", distance_strategy="inner_product"
+            )
             assert False, "Expected NotSupportedError on old version"
         except NotSupportedError:
             pass  # expected
 
 
 # ==================== 12. Embedding dimension validation (v3 VECTOR_DIM) ====================
+
 
 def test_dimension_validation():
     """_validate_embedding_dimensions should cross-check with VECTOR_DIM on v3,
@@ -339,6 +371,7 @@ def test_dimension_validation():
 
 
 # ==================== 13. Vector dimension mismatch ====================
+
 
 def test_dimension_mismatch():
     vs = make_store(table_name="test_lc_dimmm")

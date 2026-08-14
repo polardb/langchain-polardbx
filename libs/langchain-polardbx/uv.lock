@@ -1231,7 +1231,7 @@ typing = [
 requires-dist = [
     { name = "aiomysql", marker = "extra == 'async'", specifier = ">=0.2.0" },
     { name = "langchain-community", marker = "extra == 'sql'", specifier = ">=0.0.20" },
-    { name = "langchain-core", specifier = ">=0.1.1" },
+    { name = "langchain-core", specifier = ">=0.2.0" },
     { name = "mysql-connector-python", specifier = ">=8.0.0" },
     { name = "numpy", marker = "extra == 'mmr'", specifier = ">=1.24.0" },
     { name = "pymysql", marker = "extra == 'sql'", specifier = ">=1.1.0" },

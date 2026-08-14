@@ -11,15 +11,25 @@ import pytest
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
-from _helpers import DB_HOST, DB_NAME, DB_PASS, DB_PORT, DB_USER, DN_NODE, EMB, TEXTS, METADATAS, is_v3, make_store
-from langchain_core.documents import Document
+from _helpers import (
+    DB_HOST,
+    DB_NAME,
+    DB_PASS,
+    DB_PORT,
+    DB_USER,
+    DN_NODE,
+    METADATAS,
+    TEXTS,
+    is_v3,
+    make_store,
+)
 
-from langchain_polardbx import PolarDBXVectorStore, create_partitioned_table
-
+from langchain_polardbx import create_partitioned_table
 
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
+
 
 def _uri():
     """Build a mysql+pymysql URI from .env credentials."""
@@ -30,6 +40,7 @@ def _cleanup(table_name):
     """Drop a table if it exists."""
     try:
         import sqlalchemy
+
         eng = sqlalchemy.create_engine(_uri())
         with eng.connect() as conn:
             conn.execute(sqlalchemy.text(f"DROP TABLE IF EXISTS `{table_name}`"))
@@ -42,6 +53,7 @@ def _cleanup(table_name):
 # ---------------------------------------------------------------------------
 # Skip on v3 (partition + vector index not supported)
 # ---------------------------------------------------------------------------
+
 
 def _check_v3_skip():
     """Return a pytest.skip if the instance is v3."""
@@ -57,6 +69,7 @@ def _check_v3_skip():
 # ===========================================================================
 # 1. Vector store + HASH partition — end to end
 # ===========================================================================
+
 
 def test_vector_store_hash_partition():
     """Create a partitioned vector table, insert, and search."""
@@ -111,6 +124,7 @@ def test_vector_store_hash_partition_custom_column():
 # 2. Vector store + BROADCAST
 # ===========================================================================
 
+
 def test_vector_store_broadcast():
     """Create a broadcast vector table, insert, and search."""
     _check_v3_skip()
@@ -135,6 +149,7 @@ def test_vector_store_broadcast():
 # ===========================================================================
 # 3. Vector store + LOCALITY
 # ===========================================================================
+
 
 def test_vector_store_locality():
     """Create a vector table with LOCALITY clause."""
@@ -164,6 +179,7 @@ def test_vector_store_locality():
 # ===========================================================================
 # 4. Vector store + RANGE partition
 # ===========================================================================
+
 
 def test_vector_store_range_partition():
     """Create a RANGE partitioned vector table.
@@ -200,6 +216,7 @@ def test_vector_store_range_partition():
 # 5. create_partitioned_table — standalone DDL function
 # ===========================================================================
 
+
 def test_create_partitioned_table_hash():
     """create_partitioned_table with HASH strategy."""
     table = "test_lc_ddl_hash"
@@ -221,13 +238,18 @@ def test_create_partitioned_table_hash():
 
     # Verify table exists by inserting and querying
     import sqlalchemy
+
     eng = sqlalchemy.create_engine(_uri())
     with eng.connect() as conn:
-        conn.execute(sqlalchemy.text(
-            f"INSERT INTO `{table}` (user_id, amount) VALUES (1, 99.99)"
-        ))
+        conn.execute(
+            sqlalchemy.text(
+                f"INSERT INTO `{table}` (user_id, amount) VALUES (1, 99.99)"
+            )
+        )
         conn.commit()
-        result = conn.execute(sqlalchemy.text(f"SELECT COUNT(*) FROM `{table}`")).scalar()
+        result = conn.execute(
+            sqlalchemy.text(f"SELECT COUNT(*) FROM `{table}`")
+        ).scalar()
         assert result == 1
     eng.dispose()
 
@@ -253,13 +275,16 @@ def test_create_partitioned_table_broadcast():
 
     # Verify
     import sqlalchemy
+
     eng = sqlalchemy.create_engine(_uri())
     with eng.connect() as conn:
-        conn.execute(sqlalchemy.text(
-            f"INSERT INTO `{table}` (code, name) VALUES ('X', 'test')"
-        ))
+        conn.execute(
+            sqlalchemy.text(f"INSERT INTO `{table}` (code, name) VALUES ('X', 'test')")
+        )
         conn.commit()
-        result = conn.execute(sqlalchemy.text(f"SELECT COUNT(*) FROM `{table}`")).scalar()
+        result = conn.execute(
+            sqlalchemy.text(f"SELECT COUNT(*) FROM `{table}`")
+        ).scalar()
         assert result == 1
     eng.dispose()
 
@@ -289,13 +314,16 @@ def test_create_partitioned_table_range():
     )
 
     import sqlalchemy
+
     eng = sqlalchemy.create_engine(_uri())
     with eng.connect() as conn:
-        conn.execute(sqlalchemy.text(
-            f"INSERT INTO `{table}` (id, amount) VALUES (500, 10.00)"
-        ))
+        conn.execute(
+            sqlalchemy.text(f"INSERT INTO `{table}` (id, amount) VALUES (500, 10.00)")
+        )
         conn.commit()
-        result = conn.execute(sqlalchemy.text(f"SELECT COUNT(*) FROM `{table}`")).scalar()
+        result = conn.execute(
+            sqlalchemy.text(f"SELECT COUNT(*) FROM `{table}`")
+        ).scalar()
         assert result == 1
     eng.dispose()
 
@@ -324,13 +352,16 @@ def test_create_partitioned_table_list():
     )
 
     import sqlalchemy
+
     eng = sqlalchemy.create_engine(_uri())
     with eng.connect() as conn:
-        conn.execute(sqlalchemy.text(
-            f"INSERT INTO `{table}` (id, region) VALUES (1, 'east')"
-        ))
+        conn.execute(
+            sqlalchemy.text(f"INSERT INTO `{table}` (id, region) VALUES (1, 'east')")
+        )
         conn.commit()
-        result = conn.execute(sqlalchemy.text(f"SELECT COUNT(*) FROM `{table}`")).scalar()
+        result = conn.execute(
+            sqlalchemy.text(f"SELECT COUNT(*) FROM `{table}`")
+        ).scalar()
         assert result == 1
     eng.dispose()
 
@@ -349,11 +380,16 @@ def test_create_partitioned_table_single():
     )
 
     import sqlalchemy
+
     eng = sqlalchemy.create_engine(_uri())
     with eng.connect() as conn:
-        conn.execute(sqlalchemy.text(f"INSERT INTO `{table}` (id, val) VALUES (1, 'hello')"))
+        conn.execute(
+            sqlalchemy.text(f"INSERT INTO `{table}` (id, val) VALUES (1, 'hello')")
+        )
         conn.commit()
-        result = conn.execute(sqlalchemy.text(f"SELECT COUNT(*) FROM `{table}`")).scalar()
+        result = conn.execute(
+            sqlalchemy.text(f"SELECT COUNT(*) FROM `{table}`")
+        ).scalar()
         assert result == 1
     eng.dispose()
 
@@ -385,6 +421,7 @@ def test_create_partitioned_table_if_not_exists():
 # ===========================================================================
 # 6. v3 restriction check
 # ===========================================================================
+
 
 def test_v3_partition_restriction():
     """On v3 instances, partition_by should raise NotSupportedError."""
