@@ -1,18 +1,22 @@
 """Unit tests for partition table enhancement (no database required).
 
 Covers:
-1. PolarDBXVectorStore._build_partition_clause() — all branches (delegates to sql)
-2. sql._build_partition_clause() — standalone helper, all branches
+1. PolarDBXVectorStore._build_partition_clause() — all branches (delegates to _partition)
+2. _partition._build_partition_clause() — standalone helper, all branches
 3. PolarDBXVectorStore constructor validation (invalid params, mutual exclusivity)
 4. sql.create_partitioned_table() — DDL generation (mocked engine)
 5. sql.create_partitioned_table() — parameter + identifier validation
 6. Edge cases: RANGE string quoting, LIST special chars, missing keys, SQL injection
+7. _partition module independence from sqlalchemy (no hidden [sql] extra dependency)
 """
 
+import importlib
+import sys
 from unittest.mock import patch, MagicMock
 
 import pytest
 
+from langchain_polardbx._partition import _build_partition_clause as _build_from_partition
 from langchain_polardbx.vectorstores.polardbx import PolarDBXVectorStore
 from langchain_polardbx.sql import _build_partition_clause, create_partitioned_table
 
@@ -547,3 +551,44 @@ class TestCreatePartitionedTableValidation:
                 partition_column="id) PARTITIONS 1; DROP TABLE users; --",
                 partitions=4,
             )
+
+
+# ---------------------------------------------------------------------------
+# Test: _partition module independence from sqlalchemy
+# ---------------------------------------------------------------------------
+
+class TestPartitionModuleIndependence:
+    """Verify that _partition.py can be imported without sqlalchemy.
+
+    Regression test for a bug where VectorStore._build_partition_clause()
+    delegated to sql.py, which has top-level sqlalchemy imports, breaking
+    partition features for users who install without the [sql] extra.
+    """
+
+    def test_partition_module_has_no_sqlalchemy_import(self):
+        """_partition module should not import sqlalchemy at module level."""
+        mod = importlib.import_module("langchain_polardbx._partition")
+        assert not hasattr(mod, "sqlalchemy"), (
+            "_partition module must not have sqlalchemy as a dependency; "
+            "VectorStore partition features must work without [sql] extra."
+        )
+
+    def test_build_from_partition_works(self):
+        """_build_partition_clause imported from _partition should produce correct DDL."""
+        clause = _build_from_partition(
+            partition_by="HASH",
+            partition_column="user_id",
+            partitions=8,
+        )
+        assert "PARTITION BY HASH(user_id) PARTITIONS 8" in clause
+
+    def test_vectorstore_delegates_to_partition_not_sql(self):
+        """VectorStore._build_partition_clause should import from _partition, not sql."""
+        import inspect
+
+        store = _make_store(partition_by="HASH", partitions=4)
+        source = inspect.getsource(store._build_partition_clause)
+        assert "_partition" in source, (
+            "VectorStore._build_partition_clause should import from "
+            "langchain_polardbx._partition, not langchain_polardbx.sql"
+        )

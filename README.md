@@ -455,6 +455,8 @@ vectorstore = PolarDBXVectorStore(
 
 #### Standalone Partitioned Table (Non-Vector)
 
+> **Note**: `create_partitioned_table` requires the `[sql]` extra: `pip install langchain-polardbx[sql]`
+
 For non-vector tables (e.g., for SQL agents), use `create_partitioned_table`:
 
 ```python
@@ -497,6 +499,25 @@ create_partitioned_table(
         {"name": "p2", "values_less_than": "MAXVALUE"},
     ],
 )
+
+# LIST partitioning
+create_partitioned_table(
+    uri="mysql+pymysql://user:password@host:3306/database",
+    table_name="customers",
+    columns=[
+        "id BIGINT NOT NULL AUTO_INCREMENT",
+        "region VARCHAR(20) NOT NULL",
+        "name VARCHAR(255)",
+        "PRIMARY KEY (id, region)",
+    ],
+    partition_by="LIST",
+    partition_column="region",
+    partition_defs=[
+        {"name": "p_east", "values_in": ["east"]},
+        {"name": "p_west", "values_in": ["west"]},
+        {"name": "p_other", "values_in": ["north", "south"]},
+    ],
+)
 ```
 
 Supported partition strategies:
@@ -532,7 +553,7 @@ Supported partition strategies:
 | `vector_index_name` | str | None | Vector index name for FORCE INDEX hints (auto-detected if None) |
 | `partition_by` | str | None | Partition strategy: `"HASH"`, `"KEY"`, `"RANGE"`, or `"LIST"` |
 | `partitions` | int | 0 | Number of partitions (required for HASH/KEY) |
-| `partition_column` | str | `"id"` | Column to partition on |
+| `partition_column` | Optional[str] | None | Column to partition on (defaults to `"id"` at runtime) |
 | `broadcast` | bool | False | Create a broadcast table (full copy on every DN) |
 | `locality` | str | None | Pin table to a specific DN node, e.g. `"dn=node-name"` |
 | `partition_defs` | list | None | Partition definitions for RANGE/LIST (see examples above) |

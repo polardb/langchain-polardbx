@@ -15,40 +15,18 @@ from __future__ import annotations
 import re
 from typing import Any, Dict, List, Optional
 
+# Import partition helpers from a standalone module that does NOT depend
+# on sqlalchemy, so VectorStore can use them without the [sql] extra.
+from langchain_polardbx._partition import (
+    _build_partition_clause,
+    _sql_quote_string,
+    _validate_identifier,
+)
+
 from sqlalchemy.dialects.mysql.pymysql import MySQLDialect_pymysql
 from sqlalchemy.dialects.mysql.reflection import MySQLTableDefinitionParser
 from sqlalchemy.types import UserDefinedType
 from sqlalchemy.util import memoized_property
-
-
-# ---------------------------------------------------------------------------
-# Shared validation helper
-# ---------------------------------------------------------------------------
-
-_IDENT_RE = re.compile(r"^[a-zA-Z_][a-zA-Z0-9_]*$")
-
-
-def _validate_identifier(name: str, label: str = "identifier") -> None:
-    """Validate a SQL identifier to prevent SQL injection.
-
-    Raises ValueError if the name is not a valid identifier.
-    """
-    if not name or not _IDENT_RE.match(name):
-        raise ValueError(
-            f"Invalid {label}: {name!r}. "
-            "Must start with a letter or underscore, "
-            "and contain only alphanumeric characters and underscores."
-        )
-    if len(name) > 64:
-        raise ValueError(
-            f"{label.capitalize()} too long: {name!r}. "
-            "Maximum length is 64 characters."
-        )
-
-
-def _sql_quote_string(value: str) -> str:
-    """Quote a string literal using SQL-standard single-quote doubling."""
-    return "'" + value.replace("'", "''") + "'"
 
 
 class PolarDBXVector(UserDefinedType):
@@ -212,97 +190,10 @@ class PolarDBXSQLDatabase(SQLDatabase if _SQL_AVAILABLE else object):  # type: i
 
 
 # ---------------------------------------------------------------------------
-# Standalone DDL helpers — no dependency on langchain_community
+# Standalone DDL helper — no dependency on langchain_community
 # ---------------------------------------------------------------------------
-
-
-def _build_partition_clause(
-    partition_by: Optional[str] = None,
-    partition_column: str = "id",
-    partitions: int = 0,
-    broadcast: bool = False,
-    locality: Optional[str] = None,
-    partition_defs: Optional[List[Dict[str, Any]]] = None,
-) -> str:
-    """Build the PARTITION/BROADCAST/LOCALITY clause for CREATE TABLE.
-
-    Returns an empty string for a single (non-partitioned) table.
-    This is the single source of truth for partition clause generation.
-    """
-    parts: List[str] = []
-
-    if broadcast:
-        parts.append("BROADCAST")
-    elif partition_by:
-        pby = partition_by.upper()
-        if pby in ("HASH", "KEY"):
-            parts.append(
-                f"PARTITION BY {pby}({partition_column}) "
-                f"PARTITIONS {partitions}"
-            )
-        elif pby == "RANGE":
-            items = []
-            for d in partition_defs or []:
-                name = d.get("name")
-                if not name:
-                    raise ValueError(
-                        "Each RANGE partition def must have a 'name' key."
-                    )
-                vlt = d.get("values_less_than")
-                if vlt is None:
-                    raise ValueError(
-                        f"RANGE partition '{name}' is missing "
-                        "'values_less_than' key."
-                    )
-                if isinstance(vlt, str) and vlt.upper() == "MAXVALUE":
-                    items.append(
-                        f"PARTITION {name} VALUES LESS THAN (MAXVALUE)"
-                    )
-                elif isinstance(vlt, str):
-                    items.append(
-                        f"PARTITION {name} VALUES LESS THAN "
-                        f"({_sql_quote_string(vlt)})"
-                    )
-                else:
-                    items.append(
-                        f"PARTITION {name} VALUES LESS THAN ({vlt})"
-                    )
-            parts.append(
-                f"PARTITION BY RANGE({partition_column}) ("
-                + ", ".join(items) + ")"
-            )
-        elif pby == "LIST":
-            items = []
-            for d in partition_defs or []:
-                name = d.get("name")
-                if not name:
-                    raise ValueError(
-                        "Each LIST partition def must have a 'name' key."
-                    )
-                vals = d.get("values_in")
-                if vals is None:
-                    raise ValueError(
-                        f"LIST partition '{name}' is missing "
-                        "'values_in' key."
-                    )
-                val_str = ", ".join(
-                    _sql_quote_string(v) if isinstance(v, str) else str(v)
-                    for v in vals
-                )
-                items.append(
-                    f"PARTITION {name} VALUES IN ({val_str})"
-                )
-            parts.append(
-                f"PARTITION BY LIST({partition_column}) ("
-                + ", ".join(items) + ")"
-            )
-
-    if locality:
-        # Escape single quotes to prevent injection via LOCALITY value
-        safe_locality = locality.replace("'", "''")
-        parts.append(f"LOCALITY='{safe_locality}'")
-
-    return "".join(f" {p}" for p in parts) if parts else ""
+# _build_partition_clause and _validate_identifier are imported from
+# langchain_polardbx._partition at the top of this module.
 
 
 def create_partitioned_table(
@@ -320,8 +211,8 @@ def create_partitioned_table(
     """Create a table on PolarDB-X with optional partition clauses.
 
     This function executes raw DDL via SQLAlchemy and does NOT require
-    langchain_community. It only needs the ``sqlalchemy`` and ``pymysql``
-    dependencies (part of the core install).
+    langchain_community. It requires the ``[sql]`` extra:
+    ``pip install langchain-polardbx[sql]``.
 
     Args:
         uri: Connection URI, e.g.

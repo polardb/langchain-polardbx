@@ -835,9 +835,12 @@ class PolarDBXVectorStore(VectorStore):
         """Build the PARTITION/BROADCAST/LOCALITY clause for CREATE TABLE.
 
         Returns an empty string for a single (non-partitioned) table.
-        Delegates to sql._build_partition_clause() to avoid code duplication.
+        Delegates to _partition._build_partition_clause() to avoid
+        code duplication.  Uses the standalone ``_partition`` module
+        (no sqlalchemy dependency) so partitioning works with the core
+        install alone.
         """
-        from langchain_polardbx.sql import _build_partition_clause as _build
+        from langchain_polardbx._partition import _build_partition_clause as _build
         return _build(
             partition_by=self._partition_by,
             partition_column=self._partition_column,
