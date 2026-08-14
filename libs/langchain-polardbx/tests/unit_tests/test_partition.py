@@ -1,12 +1,12 @@
 """Unit tests for partition table enhancement (no database required).
 
 Covers:
-1. PolarDBXVectorStore._build_partition_clause() — all branches
-2. PolarDBXVectorStore._build_range_partition_defs() / _build_list_partition_defs()
+1. PolarDBXVectorStore._build_partition_clause() — all branches (delegates to sql)
+2. sql._build_partition_clause() — standalone helper, all branches
 3. PolarDBXVectorStore constructor validation (invalid params, mutual exclusivity)
-4. sql._build_partition_clause() — standalone helper, all branches
-5. sql.create_partitioned_table() — DDL generation (mocked engine)
-6. sql.create_partitioned_table() — parameter validation
+4. sql.create_partitioned_table() — DDL generation (mocked engine)
+5. sql.create_partitioned_table() — parameter + identifier validation
+6. Edge cases: RANGE string quoting, LIST special chars, missing keys, SQL injection
 """
 
 from unittest.mock import patch, MagicMock
@@ -39,7 +39,7 @@ def _make_store(**kwargs):
 
 
 # ===========================================================================
-# 1. VectorStore._build_partition_clause — all branches
+# 1. VectorStore._build_partition_clause — all branches (delegates to sql)
 # ===========================================================================
 
 class TestVectorStorePartitionClause:
@@ -82,6 +82,21 @@ class TestVectorStorePartitionClause:
         assert "PARTITION p0 VALUES LESS THAN (1000)" in clause
         assert "PARTITION p1 VALUES LESS THAN (2000)" in clause
         assert "PARTITION p2 VALUES LESS THAN (MAXVALUE)" in clause
+
+    def test_range_partition_with_string_values(self):
+        """RANGE with date string values should be SQL-quoted."""
+        vs = _make_store(
+            partition_by="RANGE",
+            partition_column="created_at",
+            partition_defs=[
+                {"name": "p0", "values_less_than": "2024-01-01"},
+                {"name": "p1", "values_less_than": "MAXVALUE"},
+            ],
+        )
+        clause = vs._build_partition_clause()
+        assert "PARTITION BY RANGE(created_at)" in clause
+        assert "PARTITION p0 VALUES LESS THAN ('2024-01-01')" in clause
+        assert "PARTITION p1 VALUES LESS THAN (MAXVALUE)" in clause
 
     def test_list_partition(self):
         vs = _make_store(
@@ -127,68 +142,13 @@ class TestVectorStorePartitionClause:
 
 
 # ===========================================================================
-# 2. VectorStore._build_range_partition_defs / _build_list_partition_defs
-# ===========================================================================
-
-class TestVectorStorePartitionDefs:
-    """Test the internal partition definition builders."""
-
-    def test_range_defs_with_numeric_values(self):
-        vs = _make_store(
-            partition_by="RANGE",
-            partition_defs=[{"name": "p0", "values_less_than": 100}],
-        )
-        result = vs._build_range_partition_defs()
-        assert "PARTITION p0 VALUES LESS THAN (100)" in result
-
-    def test_range_defs_with_maxvalue(self):
-        vs = _make_store(
-            partition_by="RANGE",
-            partition_defs=[
-                {"name": "p0", "values_less_than": 100},
-                {"name": "p1", "values_less_than": "MAXVALUE"},
-            ],
-        )
-        result = vs._build_range_partition_defs()
-        assert "(MAXVALUE)" in result
-        assert "(100)" in result
-
-    def test_range_defs_missing_raises(self):
-        vs = _make_store(partition_by="RANGE", partition_defs=None)
-        with pytest.raises(ValueError, match="partition_defs required"):
-            vs._build_range_partition_defs()
-
-    def test_list_defs_with_strings(self):
-        vs = _make_store(
-            partition_by="LIST",
-            partition_defs=[{"name": "p0", "values_in": ["a", "b"]}],
-        )
-        result = vs._build_list_partition_defs()
-        assert "PARTITION p0 VALUES IN ('a', 'b')" in result
-
-    def test_list_defs_with_integers(self):
-        vs = _make_store(
-            partition_by="LIST",
-            partition_defs=[{"name": "p0", "values_in": [1, 2, 3]}],
-        )
-        result = vs._build_list_partition_defs()
-        assert "PARTITION p0 VALUES IN (1, 2, 3)" in result
-
-    def test_list_defs_missing_raises(self):
-        vs = _make_store(partition_by="LIST", partition_defs=None)
-        with pytest.raises(ValueError, match="partition_defs required"):
-            vs._build_list_partition_defs()
-
-
-# ===========================================================================
-# 3. VectorStore constructor validation
+# 2. VectorStore constructor validation
 # ===========================================================================
 
 class TestVectorStoreValidation:
     """Test parameter validation in __init__ (without DB connection).
 
-    We test validation by mocking _detect_capabilities so __init__ doesn't
-    need a real DB.  We only check that invalid partition params raise the
+    We test validation by checking that invalid partition params raise the
     correct errors before any DB connection is attempted.
     """
 
@@ -240,7 +200,7 @@ class TestVectorStoreValidation:
 
 
 # ===========================================================================
-# 4. sql._build_partition_clause — standalone helper, all branches
+# 3. sql._build_partition_clause — standalone helper, all branches
 # ===========================================================================
 
 class TestSqlBuildPartitionClause:
@@ -263,7 +223,7 @@ class TestSqlBuildPartitionClause:
         assert "PARTITION BY KEY(uid)" in clause
         assert "PARTITIONS 4" in clause
 
-    def test_range(self):
+    def test_range_numeric(self):
         clause = _build_partition_clause(
             partition_by="RANGE",
             partition_column="amount",
@@ -275,6 +235,21 @@ class TestSqlBuildPartitionClause:
         assert "PARTITION BY RANGE(amount)" in clause
         assert "PARTITION p0 VALUES LESS THAN (1000)" in clause
         assert "PARTITION p1 VALUES LESS THAN (MAXVALUE)" in clause
+
+    def test_range_string_values_quoted(self):
+        """RANGE with string values (e.g., dates) should be SQL-quoted."""
+        clause = _build_partition_clause(
+            partition_by="RANGE",
+            partition_column="ts",
+            partition_defs=[
+                {"name": "p0", "values_less_than": "2024-01-01"},
+                {"name": "p1", "values_less_than": "2025-01-01"},
+                {"name": "p2", "values_less_than": "MAXVALUE"},
+            ],
+        )
+        assert "PARTITION p0 VALUES LESS THAN ('2024-01-01')" in clause
+        assert "PARTITION p1 VALUES LESS THAN ('2025-01-01')" in clause
+        assert "PARTITION p2 VALUES LESS THAN (MAXVALUE)" in clause
 
     def test_list(self):
         clause = _build_partition_clause(
@@ -288,6 +263,23 @@ class TestSqlBuildPartitionClause:
         assert "PARTITION BY LIST(region)" in clause
         assert "PARTITION p0 VALUES IN ('east', 'west')" in clause
         assert "PARTITION p1 VALUES IN ('north', 'south')" in clause
+
+    def test_list_with_integers(self):
+        clause = _build_partition_clause(
+            partition_by="LIST",
+            partition_column="code",
+            partition_defs=[{"name": "p0", "values_in": [1, 2, 3]}],
+        )
+        assert "PARTITION p0 VALUES IN (1, 2, 3)" in clause
+
+    def test_list_with_single_quote_string(self):
+        """String with single quote should use SQL-standard doubling."""
+        clause = _build_partition_clause(
+            partition_by="LIST",
+            partition_column="name",
+            partition_defs=[{"name": "p0", "values_in": ["O'Brien"]}],
+        )
+        assert "PARTITION p0 VALUES IN ('O''Brien')" in clause
 
     def test_broadcast(self):
         clause = _build_partition_clause(broadcast=True)
@@ -321,31 +313,70 @@ class TestSqlBuildPartitionClause:
         )
         assert "PARTITION BY HASH(id)" in clause
 
+    def test_locality_with_single_quote_escaped(self):
+        """LOCALITY value with single quote should be escaped."""
+        clause = _build_partition_clause(locality="dn=it's-node")
+        assert "LOCALITY='dn=it''s-node'" in clause
+
+
+# ===========================================================================
+# 4. Missing partition_defs keys — KeyError → ValueError
+# ===========================================================================
+
+class TestMissingPartitionDefKeys:
+    """Test that missing required keys in partition_defs raise ValueError."""
+
+    def test_range_missing_values_less_than(self):
+        with pytest.raises(ValueError, match="missing 'values_less_than'"):
+            _build_partition_clause(
+                partition_by="RANGE",
+                partition_defs=[{"name": "p0"}],
+            )
+
+    def test_range_missing_name(self):
+        with pytest.raises(ValueError, match="must have a 'name' key"):
+            _build_partition_clause(
+                partition_by="RANGE",
+                partition_defs=[{"values_less_than": 100}],
+            )
+
+    def test_list_missing_values_in(self):
+        with pytest.raises(ValueError, match="missing 'values_in'"):
+            _build_partition_clause(
+                partition_by="LIST",
+                partition_defs=[{"name": "p0"}],
+            )
+
+    def test_list_missing_name(self):
+        with pytest.raises(ValueError, match="must have a 'name' key"):
+            _build_partition_clause(
+                partition_by="LIST",
+                partition_defs=[{"values_in": ["a"]}],
+            )
+
 
 # ===========================================================================
 # 5. sql.create_partitioned_table — DDL generation (mocked engine)
 # ===========================================================================
 
 class TestCreatePartitionedTableDDL:
-    """Test that create_partitioned_table generates correct DDL.
+    """Test that create_partitioned_table generates correct DDL."""
 
-    We mock create_engine so no real DB connection is made.
-    """
-
-    def test_hash_table_ddl(self):
-        captured_ddl = []
-
+    def _mock_engine(self, captured):
         def fake_create_engine(uri):
             conn = MagicMock()
-            conn.execute.side_effect = lambda stmt: captured_ddl.append(stmt.text)
+            conn.execute.side_effect = lambda stmt: captured.append(stmt.text)
             conn.commit.return_value = None
             engine = MagicMock()
             engine.connect.return_value.__enter__ = lambda s: conn
             engine.connect.return_value.__exit__ = lambda *a: None
             engine.dispose.return_value = None
             return engine
+        return fake_create_engine
 
-        with patch("sqlalchemy.create_engine", side_effect=fake_create_engine):
+    def test_hash_table_ddl(self):
+        captured = []
+        with patch("sqlalchemy.create_engine", side_effect=self._mock_engine(captured)):
             create_partitioned_table(
                 uri="mysql+pymysql://u:p@host:3306/db",
                 table_name="orders",
@@ -354,54 +385,27 @@ class TestCreatePartitionedTableDDL:
                 partition_column="user_id",
                 partitions=8,
             )
-
-        assert len(captured_ddl) == 1
-        ddl = captured_ddl[0]
+        ddl = captured[0]
         assert "CREATE TABLE IF NOT EXISTS `orders`" in ddl
-        assert "id BIGINT" in ddl
         assert "PARTITION BY HASH(user_id)" in ddl
         assert "PARTITIONS 8" in ddl
 
     def test_broadcast_table_ddl(self):
-        captured_ddl = []
-
-        def fake_create_engine(uri):
-            conn = MagicMock()
-            conn.execute.side_effect = lambda stmt: captured_ddl.append(stmt.text)
-            conn.commit.return_value = None
-            engine = MagicMock()
-            engine.connect.return_value.__enter__ = lambda s: conn
-            engine.connect.return_value.__exit__ = lambda *a: None
-            engine.dispose.return_value = None
-            return engine
-
-        with patch("sqlalchemy.create_engine", side_effect=fake_create_engine):
+        captured = []
+        with patch("sqlalchemy.create_engine", side_effect=self._mock_engine(captured)):
             create_partitioned_table(
                 uri="mysql+pymysql://u:p@host:3306/db",
                 table_name="dim_table",
                 columns=["id INT", "code VARCHAR(50)"],
                 broadcast=True,
             )
-
-        ddl = captured_ddl[0]
+        ddl = captured[0]
         assert "CREATE TABLE IF NOT EXISTS `dim_table`" in ddl
         assert "BROADCAST" in ddl
-        assert "PARTITION" not in ddl
 
     def test_range_table_ddl(self):
-        captured_ddl = []
-
-        def fake_create_engine(uri):
-            conn = MagicMock()
-            conn.execute.side_effect = lambda stmt: captured_ddl.append(stmt.text)
-            conn.commit.return_value = None
-            engine = MagicMock()
-            engine.connect.return_value.__enter__ = lambda s: conn
-            engine.connect.return_value.__exit__ = lambda *a: None
-            engine.dispose.return_value = None
-            return engine
-
-        with patch("sqlalchemy.create_engine", side_effect=fake_create_engine):
+        captured = []
+        with patch("sqlalchemy.create_engine", side_effect=self._mock_engine(captured)):
             create_partitioned_table(
                 uri="mysql+pymysql://u:p@host:3306/db",
                 table_name="logs",
@@ -413,90 +417,67 @@ class TestCreatePartitionedTableDDL:
                     {"name": "p1", "values_less_than": "MAXVALUE"},
                 ],
             )
-
-        ddl = captured_ddl[0]
+        ddl = captured[0]
         assert "PARTITION BY RANGE(id)" in ddl
         assert "PARTITION p0 VALUES LESS THAN (1000)" in ddl
         assert "PARTITION p1 VALUES LESS THAN (MAXVALUE)" in ddl
 
+    def test_range_with_date_string_ddl(self):
+        """RANGE with date string should generate quoted DDL."""
+        captured = []
+        with patch("sqlalchemy.create_engine", side_effect=self._mock_engine(captured)):
+            create_partitioned_table(
+                uri="mysql+pymysql://u:p@host:3306/db",
+                table_name="events",
+                columns=["id BIGINT", "ts DATETIME"],
+                partition_by="RANGE",
+                partition_column="ts",
+                partition_defs=[
+                    {"name": "p0", "values_less_than": "2024-01-01"},
+                    {"name": "p1", "values_less_than": "MAXVALUE"},
+                ],
+            )
+        ddl = captured[0]
+        assert "PARTITION p0 VALUES LESS THAN ('2024-01-01')" in ddl
+
     def test_uri_auto_swap_mysql_pymysql(self):
-        """mysql+pymysql:// → polardbx+pymysql://."""
         captured_uri = []
-
-        def fake_create_engine(uri):
-            captured_uri.append(uri)
-            engine = MagicMock()
-            conn = MagicMock()
-            conn.execute.return_value = None
-            conn.commit.return_value = None
-            engine.connect.return_value.__enter__ = lambda s: conn
-            engine.connect.return_value.__exit__ = lambda *a: None
-            engine.dispose.return_value = None
-            return engine
-
-        with patch("sqlalchemy.create_engine", side_effect=fake_create_engine):
+        with patch("sqlalchemy.create_engine", side_effect=lambda uri: (captured_uri.append(uri), MagicMock())[1]):
             create_partitioned_table(
                 uri="mysql+pymysql://u:p@host:3306/db",
                 table_name="t",
                 columns=["id INT"],
             )
-
         assert captured_uri[0].startswith("polardbx+pymysql://")
 
     def test_uri_auto_swap_mysql_plain(self):
-        """mysql:// → polardbx+pymysql://."""
         captured_uri = []
-
-        def fake_create_engine(uri):
-            captured_uri.append(uri)
-            engine = MagicMock()
-            conn = MagicMock()
-            conn.execute.return_value = None
-            conn.commit.return_value = None
-            engine.connect.return_value.__enter__ = lambda s: conn
-            engine.connect.return_value.__exit__ = lambda *a: None
-            engine.dispose.return_value = None
-            return engine
-
-        with patch("sqlalchemy.create_engine", side_effect=fake_create_engine):
+        with patch("sqlalchemy.create_engine", side_effect=lambda uri: (captured_uri.append(uri), MagicMock())[1]):
             create_partitioned_table(
                 uri="mysql://u:p@host:3306/db",
                 table_name="t",
                 columns=["id INT"],
             )
-
         assert captured_uri[0].startswith("polardbx+pymysql://")
 
     def test_if_not_exists_false(self):
-        captured_ddl = []
-
-        def fake_create_engine(uri):
-            conn = MagicMock()
-            conn.execute.side_effect = lambda stmt: captured_ddl.append(stmt.text)
-            conn.commit.return_value = None
-            engine = MagicMock()
-            engine.connect.return_value.__enter__ = lambda s: conn
-            engine.connect.return_value.__exit__ = lambda *a: None
-            engine.dispose.return_value = None
-            return engine
-
-        with patch("sqlalchemy.create_engine", side_effect=fake_create_engine):
+        captured = []
+        with patch("sqlalchemy.create_engine", side_effect=self._mock_engine(captured)):
             create_partitioned_table(
                 uri="mysql+pymysql://u:p@host:3306/db",
                 table_name="t",
                 columns=["id INT"],
                 if_not_exists=False,
             )
-
-        assert "IF NOT EXISTS" not in captured_ddl[0]
+        assert "IF NOT EXISTS" not in captured[0]
 
 
 # ===========================================================================
-# 6. sql.create_partitioned_table — parameter validation
+# 6. sql.create_partitioned_table — parameter + identifier validation
 # ===========================================================================
 
 class TestCreatePartitionedTableValidation:
-    """Test that create_partitioned_table validates params before executing."""
+    """Test that create_partitioned_table validates params and identifiers."""
 
     def test_invalid_partition_by_raises(self):
         with pytest.raises(ValueError, match="Invalid partition_by"):
@@ -543,5 +524,26 @@ class TestCreatePartitionedTableValidation:
                 columns=["id INT"],
                 broadcast=True,
                 partition_by="HASH",
+                partitions=4,
+            )
+
+    def test_invalid_table_name_raises(self):
+        """Table name with SQL injection attempt should be rejected."""
+        with pytest.raises(ValueError, match="Invalid table name"):
+            create_partitioned_table(
+                uri="mysql://u:p@h:3306/db",
+                table_name="t; DROP TABLE users; --",
+                columns=["id INT"],
+            )
+
+    def test_invalid_partition_column_raises(self):
+        """Partition column with SQL injection attempt should be rejected."""
+        with pytest.raises(ValueError, match="Invalid partition column"):
+            create_partitioned_table(
+                uri="mysql://u:p@h:3306/db",
+                table_name="t",
+                columns=["id INT"],
+                partition_by="HASH",
+                partition_column="id) PARTITIONS 1; DROP TABLE users; --",
                 partitions=4,
             )

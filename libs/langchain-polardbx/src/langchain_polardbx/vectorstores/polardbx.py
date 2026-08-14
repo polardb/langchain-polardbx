@@ -835,68 +835,17 @@ class PolarDBXVectorStore(VectorStore):
         """Build the PARTITION/BROADCAST/LOCALITY clause for CREATE TABLE.
 
         Returns an empty string for a single (non-partitioned) table.
+        Delegates to sql._build_partition_clause() to avoid code duplication.
         """
-        parts: List[str] = []
-
-        if self._broadcast:
-            parts.append("BROADCAST")
-        elif self._partition_by:
-            col = self._partition_column
-            if self._partition_by in ("HASH", "KEY"):
-                parts.append(
-                    f"PARTITION BY {self._partition_by}({col}) "
-                    f"PARTITIONS {self._partitions}"
-                )
-            elif self._partition_by == "RANGE":
-                defs = self._build_range_partition_defs()
-                parts.append(f"PARTITION BY RANGE({col}) {defs}")
-            elif self._partition_by == "LIST":
-                defs = self._build_list_partition_defs()
-                parts.append(f"PARTITION BY LIST({col}) {defs}")
-
-        if self._locality:
-            parts.append(f"LOCALITY='{self._locality}'")
-
-        return "".join(f" {p}" for p in parts) if parts else ""
-
-    def _build_range_partition_defs(self) -> str:
-        """Build the RANGE partition definitions list."""
-        if not self._partition_defs:
-            raise ValueError(
-                "partition_defs required for RANGE partitioning"
-            )
-        items = []
-        for d in self._partition_defs:
-            name = d["name"]
-            vlt = d["values_less_than"]
-            if isinstance(vlt, str) and vlt.upper() == "MAXVALUE":
-                items.append(
-                    f"PARTITION {name} VALUES LESS THAN (MAXVALUE)"
-                )
-            else:
-                items.append(
-                    f"PARTITION {name} VALUES LESS THAN ({vlt})"
-                )
-        return "(" + ", ".join(items) + ")"
-
-    def _build_list_partition_defs(self) -> str:
-        """Build the LIST partition definitions list."""
-        if not self._partition_defs:
-            raise ValueError(
-                "partition_defs required for LIST partitioning"
-            )
-        items = []
-        for d in self._partition_defs:
-            name = d["name"]
-            vals = d["values_in"]
-            val_str = ", ".join(
-                repr(v) if isinstance(v, str) else str(v)
-                for v in vals
-            )
-            items.append(
-                f"PARTITION {name} VALUES IN ({val_str})"
-            )
-        return "(" + ", ".join(items) + ")"
+        from langchain_polardbx.sql import _build_partition_clause as _build
+        return _build(
+            partition_by=self._partition_by,
+            partition_column=self._partition_column,
+            partitions=self._partitions,
+            broadcast=self._broadcast,
+            locality=self._locality,
+            partition_defs=self._partition_defs,
+        )
 
     def _build_create_table_sql(self, dimension: int) -> str:
         """Build the CREATE TABLE SQL with optional partition clause.

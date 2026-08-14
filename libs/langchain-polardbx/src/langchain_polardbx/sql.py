@@ -21,6 +21,36 @@ from sqlalchemy.types import UserDefinedType
 from sqlalchemy.util import memoized_property
 
 
+# ---------------------------------------------------------------------------
+# Shared validation helper
+# ---------------------------------------------------------------------------
+
+_IDENT_RE = re.compile(r"^[a-zA-Z_][a-zA-Z0-9_]*$")
+
+
+def _validate_identifier(name: str, label: str = "identifier") -> None:
+    """Validate a SQL identifier to prevent SQL injection.
+
+    Raises ValueError if the name is not a valid identifier.
+    """
+    if not name or not _IDENT_RE.match(name):
+        raise ValueError(
+            f"Invalid {label}: {name!r}. "
+            "Must start with a letter or underscore, "
+            "and contain only alphanumeric characters and underscores."
+        )
+    if len(name) > 64:
+        raise ValueError(
+            f"{label.capitalize()} too long: {name!r}. "
+            "Maximum length is 64 characters."
+        )
+
+
+def _sql_quote_string(value: str) -> str:
+    """Quote a string literal using SQL-standard single-quote doubling."""
+    return "'" + value.replace("'", "''") + "'"
+
+
 class PolarDBXVector(UserDefinedType):
     """PolarDB-X VECTOR type for SQLAlchemy schema reflection.
 
@@ -197,6 +227,7 @@ def _build_partition_clause(
     """Build the PARTITION/BROADCAST/LOCALITY clause for CREATE TABLE.
 
     Returns an empty string for a single (non-partitioned) table.
+    This is the single source of truth for partition clause generation.
     """
     parts: List[str] = []
 
@@ -212,14 +243,29 @@ def _build_partition_clause(
         elif pby == "RANGE":
             items = []
             for d in partition_defs or []:
-                vlt = d["values_less_than"]
+                name = d.get("name")
+                if not name:
+                    raise ValueError(
+                        "Each RANGE partition def must have a 'name' key."
+                    )
+                vlt = d.get("values_less_than")
+                if vlt is None:
+                    raise ValueError(
+                        f"RANGE partition '{name}' is missing "
+                        "'values_less_than' key."
+                    )
                 if isinstance(vlt, str) and vlt.upper() == "MAXVALUE":
                     items.append(
-                        f"PARTITION {d['name']} VALUES LESS THAN (MAXVALUE)"
+                        f"PARTITION {name} VALUES LESS THAN (MAXVALUE)"
+                    )
+                elif isinstance(vlt, str):
+                    items.append(
+                        f"PARTITION {name} VALUES LESS THAN "
+                        f"({_sql_quote_string(vlt)})"
                     )
                 else:
                     items.append(
-                        f"PARTITION {d['name']} VALUES LESS THAN ({vlt})"
+                        f"PARTITION {name} VALUES LESS THAN ({vlt})"
                     )
             parts.append(
                 f"PARTITION BY RANGE({partition_column}) ("
@@ -228,13 +274,23 @@ def _build_partition_clause(
         elif pby == "LIST":
             items = []
             for d in partition_defs or []:
-                vals = d["values_in"]
+                name = d.get("name")
+                if not name:
+                    raise ValueError(
+                        "Each LIST partition def must have a 'name' key."
+                    )
+                vals = d.get("values_in")
+                if vals is None:
+                    raise ValueError(
+                        f"LIST partition '{name}' is missing "
+                        "'values_in' key."
+                    )
                 val_str = ", ".join(
-                    repr(v) if isinstance(v, str) else str(v)
+                    _sql_quote_string(v) if isinstance(v, str) else str(v)
                     for v in vals
                 )
                 items.append(
-                    f"PARTITION {d['name']} VALUES IN ({val_str})"
+                    f"PARTITION {name} VALUES IN ({val_str})"
                 )
             parts.append(
                 f"PARTITION BY LIST({partition_column}) ("
@@ -242,7 +298,9 @@ def _build_partition_clause(
             )
 
     if locality:
-        parts.append(f"LOCALITY='{locality}'")
+        # Escape single quotes to prevent injection via LOCALITY value
+        safe_locality = locality.replace("'", "''")
+        parts.append(f"LOCALITY='{safe_locality}'")
 
     return "".join(f" {p}" for p in parts) if parts else ""
 
@@ -303,6 +361,11 @@ def create_partitioned_table(
             )
     """
     _register_dialect()
+
+    # Validate identifiers to prevent SQL injection
+    _validate_identifier(table_name, "table name")
+    if partition_by:
+        _validate_identifier(partition_column, "partition column")
 
     # Auto-swap mysql:// to polardbx://
     if uri.startswith("mysql+pymysql://"):
