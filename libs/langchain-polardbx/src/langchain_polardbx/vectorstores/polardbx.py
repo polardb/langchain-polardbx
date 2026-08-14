@@ -249,9 +249,7 @@ class PolarDBXVectorStore(VectorStore):
         self._capabilities: Dict[str, bool] = {}
 
         # Validate distance strategy
-        if self._distance_strategy not in (
-            "cosine", "euclidean", "inner_product"
-        ):
+        if self._distance_strategy not in ("cosine", "euclidean", "inner_product"):
             raise ValueError(
                 f"Invalid distance_strategy: {distance_strategy}. "
                 "Must be 'cosine', 'euclidean', or 'inner_product'."
@@ -262,7 +260,10 @@ class PolarDBXVectorStore(VectorStore):
 
         # Validate partition params
         if self._partition_by and self._partition_by not in (
-            "HASH", "KEY", "RANGE", "LIST"
+            "HASH",
+            "KEY",
+            "RANGE",
+            "LIST",
         ):
             raise ValueError(
                 f"Invalid partition_by: {partition_by}. "
@@ -270,8 +271,7 @@ class PolarDBXVectorStore(VectorStore):
             )
         if self._partition_by in ("HASH", "KEY") and self._partitions <= 0:
             raise ValueError(
-                "partitions must be > 0 when partition_by is "
-                "'HASH' or 'KEY'."
+                "partitions must be > 0 when partition_by is 'HASH' or 'KEY'."
             )
         if self._partition_by in ("RANGE", "LIST") and not self._partition_defs:
             raise ValueError(
@@ -284,9 +284,7 @@ class PolarDBXVectorStore(VectorStore):
                 "Use one or the other."
             )
         if self._partition_by and self._partition_column != "id":
-            self._validate_identifier(
-                self._partition_column, "partition column"
-            )
+            self._validate_identifier(self._partition_column, "partition column")
 
         # Create connection pool
         pool_config = {
@@ -320,9 +318,8 @@ class PolarDBXVectorStore(VectorStore):
             raise
 
         # Validate inner_product requires v3 distance functions
-        if (
-            self._distance_strategy == "inner_product"
-            and not self._capabilities.get("vec_distance", False)
+        if self._distance_strategy == "inner_product" and not self._capabilities.get(
+            "vec_distance", False
         ):
             self.close()
             raise NotSupportedError(
@@ -333,9 +330,8 @@ class PolarDBXVectorStore(VectorStore):
 
         # Validate partition/broadcast is not supported on v3 instances
         # (v3 does not support vector indexes on partitioned/broadcast tables)
-        if (
-            (self._partition_by or self._broadcast)
-            and self._capabilities.get("vec_distance", False)
+        if (self._partition_by or self._broadcast) and self._capabilities.get(
+            "vec_distance", False
         ):
             self.close()
             raise NotSupportedError(
@@ -726,13 +722,11 @@ class PolarDBXVectorStore(VectorStore):
             "vec_distance": self._probe_vec_distance(),
             "vec_totext": self._probe_function(
                 None,
-                "SELECT VEC_TOTEXT(VEC_FROMTEXT('[1,2,3]'))"
-                " IS NOT NULL",
+                "SELECT VEC_TOTEXT(VEC_FROMTEXT('[1,2,3]')) IS NOT NULL",
             ),
             "vec_dim": self._probe_function(
                 None,
-                "SELECT VECTOR_DIM(VEC_FROMTEXT('[1,2,3]'))"
-                " IS NOT NULL",
+                "SELECT VECTOR_DIM(VEC_FROMTEXT('[1,2,3]')) IS NOT NULL",
             ),
         }
         caps["vector_indexes_view"] = self._probe_table_exists(
@@ -765,9 +759,7 @@ class PolarDBXVectorStore(VectorStore):
             err_msg = str(e).upper()
             # Function exists but needs a vector index to determine distance type
             if "NO VECTOR INDEX" in err_msg or "CANNOT DETERMINE" in err_msg:
-                logger.debug(
-                    "VEC_DISTANCE exists but needs index context: %s", e
-                )
+                logger.debug("VEC_DISTANCE exists but needs index context: %s", e)
                 return True
             logger.debug("VEC_DISTANCE probe failed: %s", e)
             return False
@@ -841,6 +833,7 @@ class PolarDBXVectorStore(VectorStore):
         install alone.
         """
         from langchain_polardbx._partition import _build_partition_clause as _build
+
         return _build(
             partition_by=self._partition_by,
             partition_column=self._partition_column,
@@ -861,9 +854,8 @@ class PolarDBXVectorStore(VectorStore):
         """
         # Build optional EF_CONSTRUCTION clause (v3 only)
         index_extra = ""
-        if (
-            self._ef_construction is not None
-            and self._capabilities.get("vec_distance", False)
+        if self._ef_construction is not None and self._capabilities.get(
+            "vec_distance", False
         ):
             index_extra = f" EF_CONSTRUCTION={self._ef_construction}"
 
@@ -915,13 +907,9 @@ class PolarDBXVectorStore(VectorStore):
                 row = cursor.fetchone()
                 if row:
                     create_sql = (
-                        row.get("Create Table")
-                        or row.get("CREATE TABLE")
-                        or ""
+                        row.get("Create Table") or row.get("CREATE TABLE") or ""
                     )
-                    m = re.search(
-                        r"VECTOR INDEX `([^`]+)`", create_sql, re.IGNORECASE
-                    )
+                    m = re.search(r"VECTOR INDEX `([^`]+)`", create_sql, re.IGNORECASE)
                     if m:
                         self._vector_index_name = m.group(1)
                         return self._vector_index_name
@@ -1000,7 +988,9 @@ class PolarDBXVectorStore(VectorStore):
                 f"M={m_val}{ef_clause} DISTANCE={dist_val}"
             )
         self._vector_index_name = index_name
-        logger.info("Vector index '%s' created on table %s", index_name, self._table_name)
+        logger.info(
+            "Vector index '%s' created on table %s", index_name, self._table_name
+        )
 
     def drop_vector_index(self, index_name: Optional[str] = None) -> None:
         """Drop a vector index.
@@ -1094,10 +1084,11 @@ class PolarDBXVectorStore(VectorStore):
                 f"'{self._table_name}', 'embedding')"
             )
             rows = cursor.fetchall()
-            return {
-                row.get("Message", row.get("message", str(row))): row
-                for row in rows
-            } if rows else {}
+            return (
+                {row.get("Message", row.get("message", str(row))): row for row in rows}
+                if rows
+                else {}
+            )
 
     def explain_index_health(self) -> Dict[str, Any]:
         """Check vector index health and return diagnostics (v3 only).
@@ -1165,10 +1156,11 @@ class PolarDBXVectorStore(VectorStore):
                 f"'{self._table_name}', 'embedding')"
             )
             rows = await cursor.fetchall()
-            return {
-                row.get("Message", row.get("message", str(row))): row
-                for row in rows
-            } if rows else {}
+            return (
+                {row.get("Message", row.get("message", str(row))): row for row in rows}
+                if rows
+                else {}
+            )
 
     async def aexplain_index_health(self) -> Dict[str, Any]:
         """Async check vector index health (v3 only)."""
@@ -1228,7 +1220,9 @@ class PolarDBXVectorStore(VectorStore):
                 f"M={m_val}{ef_clause} DISTANCE={dist_val}"
             )
         self._vector_index_name = index_name
-        logger.info("Vector index '%s' created on table %s", index_name, self._table_name)
+        logger.info(
+            "Vector index '%s' created on table %s", index_name, self._table_name
+        )
 
     async def adrop_vector_index(self, index_name: Optional[str] = None) -> None:
         """Async drop a vector index."""
@@ -1236,7 +1230,9 @@ class PolarDBXVectorStore(VectorStore):
         if not name:
             raise ValueError("No vector index name specified or detectable.")
         async with self._aget_cursor() as cursor:
-            await cursor.execute(f"ALTER TABLE `{self._table_name}` DROP INDEX `{name}`")
+            await cursor.execute(
+                f"ALTER TABLE `{self._table_name}` DROP INDEX `{name}`"
+            )
         self._vector_index_name = None
         logger.info("Vector index '%s' dropped from table %s", name, self._table_name)
 
@@ -1357,8 +1353,7 @@ class PolarDBXVectorStore(VectorStore):
             sample_vec = self._vector_to_string(embeddings[0])
             with self._get_cursor() as cursor:
                 cursor.execute(
-                    "SELECT VECTOR_DIM(VEC_FROMTEXT(%s)) AS dim",
-                    (sample_vec,)
+                    "SELECT VECTOR_DIM(VEC_FROMTEXT(%s)) AS dim", (sample_vec,)
                 )
                 row = cursor.fetchone()
                 if row and row.get("dim") != expected:
@@ -1478,7 +1473,7 @@ class PolarDBXVectorStore(VectorStore):
                 filter = {
                     "category": {"$in": ["phone", "tablet"]},
                     "price": {"$gt": 100, "$lt": 1000},
-                    "status": {"$ne": "deleted"}
+                    "status": {"$ne": "deleted"},
                 }
         """
         if not filter:
@@ -1713,9 +1708,7 @@ class PolarDBXVectorStore(VectorStore):
                 from langchain_core.documents import Document
 
                 documents = [
-                    Document(
-                        page_content="Hello world", metadata={"source": "web"}
-                    ),
+                    Document(page_content="Hello world", metadata={"source": "web"}),
                     Document(
                         page_content="LangChain is great",
                         metadata={"source": "doc"},
@@ -1825,7 +1818,7 @@ class PolarDBXVectorStore(VectorStore):
 
                 ids = vectorstore.add_embeddings(
                     text_embeddings=text_embeddings,
-                    metadatas=[{"source": "web"}, {"source": "doc"}]
+                    metadatas=[{"source": "web"}, {"source": "doc"}],
                 )
         """
         # Convert to list for multiple iterations
@@ -3370,7 +3363,9 @@ class PolarDBXVectorStore(VectorStore):
             logger.info("Cleared all data from table %s", self._table_name)
         except Exception as e:
             if "1146" in str(e) or "doesn't exist" in str(e).lower():
-                logger.debug("Table %s does not exist, skipping clear", self._table_name)
+                logger.debug(
+                    "Table %s does not exist, skipping clear", self._table_name
+                )
             else:
                 raise
 
@@ -3382,7 +3377,9 @@ class PolarDBXVectorStore(VectorStore):
             logger.info("Cleared all data from table %s", self._table_name)
         except Exception as e:
             if "1146" in str(e) or "doesn't exist" in str(e).lower():
-                logger.debug("Table %s does not exist, skipping clear", self._table_name)
+                logger.debug(
+                    "Table %s does not exist, skipping clear", self._table_name
+                )
             else:
                 raise
 
@@ -3402,7 +3399,9 @@ class PolarDBXVectorStore(VectorStore):
         """Async get the number of vectors in the table."""
         try:
             async with self._aget_cursor() as cursor:
-                await cursor.execute(f"SELECT COUNT(*) as count FROM `{self._table_name}`")
+                await cursor.execute(
+                    f"SELECT COUNT(*) as count FROM `{self._table_name}`"
+                )
                 result = await cursor.fetchone()
                 return result["count"] if result else 0
         except Exception as e:
@@ -3432,14 +3431,12 @@ class PolarDBXVectorStore(VectorStore):
 
                 # Simple equality
                 docs = vectorstore.search_by_metadata(
-                    filter={"category": "phone"},
-                    limit=10
+                    filter={"category": "phone"}, limit=10
                 )
 
                 # With operators
                 docs = vectorstore.search_by_metadata(
-                    filter={"category": "phone", "price": {"$gt": 1000}},
-                    limit=10
+                    filter={"category": "phone", "price": {"$gt": 1000}}, limit=10
                 )
         """
         where_clause, params = self._build_filter_clause(filter)
@@ -3494,9 +3491,7 @@ class PolarDBXVectorStore(VectorStore):
             .. code-block:: python
 
                 # Delete all documents with category 'phone'
-                deleted = vectorstore.delete_by_metadata(
-                    filter={"category": "phone"}
-                )
+                deleted = vectorstore.delete_by_metadata(filter={"category": "phone"})
 
                 # Delete with operator
                 deleted = vectorstore.delete_by_metadata(

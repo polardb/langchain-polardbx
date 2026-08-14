@@ -15,18 +15,18 @@ from __future__ import annotations
 import re
 from typing import Any, Dict, List, Optional
 
-# Import partition helpers from a standalone module that does NOT depend
-# on sqlalchemy, so VectorStore can use them without the [sql] extra.
-from langchain_polardbx._partition import (
-    _build_partition_clause,
-    _sql_quote_string,
-    _validate_identifier,
-)
-
 from sqlalchemy.dialects.mysql.pymysql import MySQLDialect_pymysql
 from sqlalchemy.dialects.mysql.reflection import MySQLTableDefinitionParser
 from sqlalchemy.types import UserDefinedType
 from sqlalchemy.util import memoized_property
+
+# Re-export partition helpers from a standalone module that does NOT depend
+# on sqlalchemy, so VectorStore can use them without the [sql] extra.
+from langchain_polardbx._partition import (  # noqa: F401
+    _build_partition_clause,
+    _sql_quote_string,
+    _validate_identifier,
+)
 
 
 class PolarDBXVector(UserDefinedType):
@@ -178,13 +178,11 @@ class PolarDBXSQLDatabase(SQLDatabase if _SQL_AVAILABLE else object):  # type: i
 
         # Auto-swap mysql+pymysql:// -> polardbx+pymysql://
         if database_uri.startswith("mysql+pymysql://"):
-            database_uri = "polardbx+pymysql://" + database_uri[
-                len("mysql+pymysql://") :
-            ]
+            database_uri = (
+                "polardbx+pymysql://" + database_uri[len("mysql+pymysql://") :]
+            )
         elif database_uri.startswith("mysql://"):
-            database_uri = "polardbx+pymysql://" + database_uri[
-                len("mysql://") :
-            ]
+            database_uri = "polardbx+pymysql://" + database_uri[len("mysql://") :]
 
         return super().from_uri(database_uri, engine_args, **kwargs)  # type: ignore[return-value]
 
@@ -260,9 +258,9 @@ def create_partitioned_table(
 
     # Auto-swap mysql:// to polardbx://
     if uri.startswith("mysql+pymysql://"):
-        uri = "polardbx+pymysql://" + uri[len("mysql+pymysql://"):]
+        uri = "polardbx+pymysql://" + uri[len("mysql+pymysql://") :]
     elif uri.startswith("mysql://"):
-        uri = "polardbx+pymysql://" + uri[len("mysql://"):]
+        uri = "polardbx+pymysql://" + uri[len("mysql://") :]
 
     # Validate params
     if partition_by:
@@ -273,17 +271,11 @@ def create_partitioned_table(
                 "Must be 'HASH', 'KEY', 'RANGE', or 'LIST'."
             )
         if partition_by in ("HASH", "KEY") and partitions <= 0:
-            raise ValueError(
-                "partitions must be > 0 for HASH/KEY partitioning."
-            )
+            raise ValueError("partitions must be > 0 for HASH/KEY partitioning.")
         if partition_by in ("RANGE", "LIST") and not partition_defs:
-            raise ValueError(
-                "partition_defs required for RANGE/LIST partitioning."
-            )
+            raise ValueError("partition_defs required for RANGE/LIST partitioning.")
     if broadcast and partition_by:
-        raise ValueError(
-            "broadcast and partition_by are mutually exclusive."
-        )
+        raise ValueError("broadcast and partition_by are mutually exclusive.")
 
     # Build DDL
     exists_clause = "IF NOT EXISTS " if if_not_exists else ""

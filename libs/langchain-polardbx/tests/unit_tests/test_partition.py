@@ -11,19 +11,24 @@ Covers:
 """
 
 import importlib
-import sys
-from unittest.mock import patch, MagicMock
+from unittest.mock import MagicMock, patch
 
 import pytest
 
-from langchain_polardbx._partition import _build_partition_clause as _build_from_partition
+from langchain_polardbx._partition import (
+    _build_partition_clause as _build_from_partition,
+)
+from langchain_polardbx.sql import create_partitioned_table
 from langchain_polardbx.vectorstores.polardbx import PolarDBXVectorStore
-from langchain_polardbx.sql import _build_partition_clause, create_partitioned_table
+
+# Alias for backward-compatible references in test code
+_build_partition_clause = _build_from_partition
 
 
 # ---------------------------------------------------------------------------
 # Helpers — create a bare PolarDBXVectorStore without DB connection
 # ---------------------------------------------------------------------------
+
 
 def _make_store(**kwargs):
     """Create a PolarDBXVectorStore instance without calling __init__."""
@@ -45,6 +50,7 @@ def _make_store(**kwargs):
 # ===========================================================================
 # 1. VectorStore._build_partition_clause — all branches (delegates to sql)
 # ===========================================================================
+
 
 class TestVectorStorePartitionClause:
     """Test PolarDBXVectorStore._build_partition_clause() output."""
@@ -130,9 +136,7 @@ class TestVectorStorePartitionClause:
 
     def test_hash_partition_with_locality(self):
         """HASH partition + LOCALITY → both clauses."""
-        vs = _make_store(
-            partition_by="HASH", partitions=4, locality="dn=node-0"
-        )
+        vs = _make_store(partition_by="HASH", partitions=4, locality="dn=node-0")
         clause = vs._build_partition_clause()
         assert "PARTITION BY HASH(id)" in clause
         assert "PARTITIONS 4" in clause
@@ -149,6 +153,7 @@ class TestVectorStorePartitionClause:
 # 2. VectorStore constructor validation
 # ===========================================================================
 
+
 class TestVectorStoreValidation:
     """Test parameter validation in __init__ (without DB connection).
 
@@ -160,45 +165,72 @@ class TestVectorStoreValidation:
         """Invalid partition_by value raises ValueError."""
         with pytest.raises(ValueError, match="Invalid partition_by"):
             PolarDBXVectorStore(
-                host="localhost", port=3306, user="u", password="p",
-                database="db", embedding=MagicMock(),
-                table_name="t", partition_by="INVALID",
+                host="localhost",
+                port=3306,
+                user="u",
+                password="p",
+                database="db",
+                embedding=MagicMock(),
+                table_name="t",
+                partition_by="INVALID",
             )
 
     def test_hash_without_partitions_raises(self):
         """HASH partition without partitions > 0 raises ValueError."""
         with pytest.raises(ValueError, match="partitions must be > 0"):
             PolarDBXVectorStore(
-                host="localhost", port=3306, user="u", password="p",
-                database="db", embedding=MagicMock(),
-                table_name="t", partition_by="HASH", partitions=0,
+                host="localhost",
+                port=3306,
+                user="u",
+                password="p",
+                database="db",
+                embedding=MagicMock(),
+                table_name="t",
+                partition_by="HASH",
+                partitions=0,
             )
 
     def test_range_without_defs_raises(self):
         """RANGE partition without partition_defs raises ValueError."""
         with pytest.raises(ValueError, match="partition_defs must be provided"):
             PolarDBXVectorStore(
-                host="localhost", port=3306, user="u", password="p",
-                database="db", embedding=MagicMock(),
-                table_name="t", partition_by="RANGE",
+                host="localhost",
+                port=3306,
+                user="u",
+                password="p",
+                database="db",
+                embedding=MagicMock(),
+                table_name="t",
+                partition_by="RANGE",
             )
 
     def test_list_without_defs_raises(self):
         """LIST partition without partition_defs raises ValueError."""
         with pytest.raises(ValueError, match="partition_defs must be provided"):
             PolarDBXVectorStore(
-                host="localhost", port=3306, user="u", password="p",
-                database="db", embedding=MagicMock(),
-                table_name="t", partition_by="LIST",
+                host="localhost",
+                port=3306,
+                user="u",
+                password="p",
+                database="db",
+                embedding=MagicMock(),
+                table_name="t",
+                partition_by="LIST",
             )
 
     def test_broadcast_and_partition_mutually_exclusive(self):
         """broadcast=True and partition_by set together raises ValueError."""
         with pytest.raises(ValueError, match="mutually exclusive"):
             PolarDBXVectorStore(
-                host="localhost", port=3306, user="u", password="p",
-                database="db", embedding=MagicMock(),
-                table_name="t", broadcast=True, partition_by="HASH",
+                host="localhost",
+                port=3306,
+                user="u",
+                password="p",
+                database="db",
+                embedding=MagicMock(),
+                table_name="t",
+                broadcast=True,
+                partition_by="HASH",
                 partitions=4,
             )
 
@@ -207,28 +239,29 @@ class TestVectorStoreValidation:
 # 3. sql._build_partition_clause — standalone helper, all branches
 # ===========================================================================
 
+
 class TestSqlBuildPartitionClause:
-    """Test the standalone _build_partition_clause() in sql.py."""
+    """Test the standalone _build_partition_clause() in _partition.py."""
 
     def test_no_partition_returns_empty(self):
-        assert _build_partition_clause() == ""
+        assert _build_from_partition() == ""
 
     def test_hash(self):
-        clause = _build_partition_clause(
+        clause = _build_from_partition(
             partition_by="HASH", partition_column="id", partitions=8
         )
         assert "PARTITION BY HASH(id)" in clause
         assert "PARTITIONS 8" in clause
 
     def test_key(self):
-        clause = _build_partition_clause(
+        clause = _build_from_partition(
             partition_by="KEY", partition_column="uid", partitions=4
         )
         assert "PARTITION BY KEY(uid)" in clause
         assert "PARTITIONS 4" in clause
 
     def test_range_numeric(self):
-        clause = _build_partition_clause(
+        clause = _build_from_partition(
             partition_by="RANGE",
             partition_column="amount",
             partition_defs=[
@@ -242,7 +275,7 @@ class TestSqlBuildPartitionClause:
 
     def test_range_string_values_quoted(self):
         """RANGE with string values (e.g., dates) should be SQL-quoted."""
-        clause = _build_partition_clause(
+        clause = _build_from_partition(
             partition_by="RANGE",
             partition_column="ts",
             partition_defs=[
@@ -312,9 +345,7 @@ class TestSqlBuildPartitionClause:
 
     def test_lowercase_partition_by(self):
         """partition_by is case-insensitive."""
-        clause = _build_partition_clause(
-            partition_by="hash", partitions=4
-        )
+        clause = _build_partition_clause(partition_by="hash", partitions=4)
         assert "PARTITION BY HASH(id)" in clause
 
     def test_locality_with_single_quote_escaped(self):
@@ -326,6 +357,7 @@ class TestSqlBuildPartitionClause:
 # ===========================================================================
 # 4. Missing partition_defs keys — KeyError → ValueError
 # ===========================================================================
+
 
 class TestMissingPartitionDefKeys:
     """Test that missing required keys in partition_defs raise ValueError."""
@@ -363,6 +395,7 @@ class TestMissingPartitionDefKeys:
 # 5. sql.create_partitioned_table — DDL generation (mocked engine)
 # ===========================================================================
 
+
 class TestCreatePartitionedTableDDL:
     """Test that create_partitioned_table generates correct DDL."""
 
@@ -376,6 +409,7 @@ class TestCreatePartitionedTableDDL:
             engine.connect.return_value.__exit__ = lambda *a: None
             engine.dispose.return_value = None
             return engine
+
         return fake_create_engine
 
     def test_hash_table_ddl(self):
@@ -446,7 +480,10 @@ class TestCreatePartitionedTableDDL:
 
     def test_uri_auto_swap_mysql_pymysql(self):
         captured_uri = []
-        with patch("sqlalchemy.create_engine", side_effect=lambda uri: (captured_uri.append(uri), MagicMock())[1]):
+        with patch(
+            "sqlalchemy.create_engine",
+            side_effect=lambda uri: (captured_uri.append(uri), MagicMock())[1],
+        ):
             create_partitioned_table(
                 uri="mysql+pymysql://u:p@host:3306/db",
                 table_name="t",
@@ -456,7 +493,10 @@ class TestCreatePartitionedTableDDL:
 
     def test_uri_auto_swap_mysql_plain(self):
         captured_uri = []
-        with patch("sqlalchemy.create_engine", side_effect=lambda uri: (captured_uri.append(uri), MagicMock())[1]):
+        with patch(
+            "sqlalchemy.create_engine",
+            side_effect=lambda uri: (captured_uri.append(uri), MagicMock())[1],
+        ):
             create_partitioned_table(
                 uri="mysql://u:p@host:3306/db",
                 table_name="t",
@@ -479,6 +519,7 @@ class TestCreatePartitionedTableDDL:
 # ===========================================================================
 # 6. sql.create_partitioned_table — parameter + identifier validation
 # ===========================================================================
+
 
 class TestCreatePartitionedTableValidation:
     """Test that create_partitioned_table validates params and identifiers."""
@@ -556,6 +597,7 @@ class TestCreatePartitionedTableValidation:
 # ---------------------------------------------------------------------------
 # Test: _partition module independence from sqlalchemy
 # ---------------------------------------------------------------------------
+
 
 class TestPartitionModuleIndependence:
     """Verify that _partition.py can be imported without sqlalchemy.
