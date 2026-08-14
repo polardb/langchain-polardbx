@@ -47,7 +47,7 @@ All transaction isolation levels (READ-COMMITTED, REPEATABLE-READ, SERIALIZABLE)
 - **Batch Operations**: Efficient batch insert and bulk upsert with configurable batch size
 - **Full Async Support**: All public methods have async equivalents (`aadd_texts`, `asimilarity_search`, etc.)
 - **Dual-Version Compatibility**: Automatically detects database capabilities and adapts SQL accordingly
-- **Partitioned Table Support**: Create partitioned vector tables with HASH/KEY partitioning
+- **Partitioned Table Support**: Create partitioned vector tables with HASH/KEY/RANGE/LIST strategies, broadcast tables, and LOCALITY node assignment
 - **Connection Pooling**: Built-in connection pool with automatic retry logic
 - **SQL Database Integration**: Use PolarDB-X as a SQL database for LangChain agents with automatic DDL reflection compatibility (tab indentation, ENUM spacing, VECTOR type support)
 
@@ -410,23 +410,103 @@ async def main():
 asyncio.run(main())
 ```
 
-### Partitioned Table
+### Partitioned Tables
+
+PolarDB-X is a distributed database that supports table partitioning for scalability. This package supports creating partitioned vector tables and standalone partitioned tables.
+
+#### Vector Store with Partitioning
 
 ```python
-# Create a partitioned vector table (HASH partitioning, 8 partitions)
-# Note: Not available on all PolarDB-X versions
+from langchain_polardbx import PolarDBXVectorStore
+
+# HASH partitioning (8 partitions on the id column)
 vectorstore = PolarDBXVectorStore(
-    host="your-host",
-    port=3306,
-    user="your-user",
-    password="your-password",
-    database="your-database",
-    embedding=embeddings,
+    host="your-host", port=3306, user="your-user", password="your-password",
+    database="your-database", embedding=embeddings,
     table_name="partitioned_vectors",
-    partition_by="HASH",  # or "KEY"
-    partitions=8,
+    partition_by="HASH",          # "HASH", "KEY", "RANGE", or "LIST"
+    partition_column="id",        # column to partition on (default: "id")
+    partitions=8,                 # number of partitions (HASH/KEY only)
+)
+
+# Broadcast table (full copy on every DN node)
+vectorstore = PolarDBXVectorStore(
+    ..., broadcast=True,
+)
+
+# RANGE partitioning
+vectorstore = PolarDBXVectorStore(
+    ..., partition_by="RANGE", partition_column="id",
+    partition_defs=[
+        {"name": "p0", "values_less_than": 1000},
+        {"name": "p1", "values_less_than": "MAXVALUE"},
+    ],
+)
+
+# With LOCALITY (pin table to a specific DN node)
+vectorstore = PolarDBXVectorStore(
+    ..., locality="dn=your-dn-node-name",
 )
 ```
+
+> **Note**: Partitioned vector tables are not supported on PolarDB-X v3 instances. The package automatically detects this and raises `NotSupportedError` if you attempt to use partitioning on an incompatible version.
+
+#### Standalone Partitioned Table (Non-Vector)
+
+For non-vector tables (e.g., for SQL agents), use `create_partitioned_table`:
+
+```python
+from langchain_polardbx import create_partitioned_table
+
+# HASH partitioning
+create_partitioned_table(
+    uri="mysql+pymysql://user:password@host:3306/database",
+    table_name="orders",
+    columns=[
+        "id BIGINT NOT NULL AUTO_INCREMENT",
+        "user_id BIGINT NOT NULL",
+        "amount DECIMAL(10,2)",
+        "created_at DATETIME",
+        "PRIMARY KEY (id)",
+    ],
+    partition_by="HASH",
+    partition_column="user_id",
+    partitions=16,
+)
+
+# Broadcast table (dimension table, full copy on every DN)
+create_partitioned_table(
+    uri="mysql+pymysql://user:password@host:3306/database",
+    table_name="dim_currency",
+    columns=["code VARCHAR(10)", "name VARCHAR(100)", "PRIMARY KEY (code)"],
+    broadcast=True,
+)
+
+# RANGE partitioning
+create_partitioned_table(
+    uri="mysql+pymysql://user:password@host:3306/database",
+    table_name="logs",
+    columns=["id BIGINT NOT NULL", "ts DATETIME", "PRIMARY KEY (id)"],
+    partition_by="RANGE",
+    partition_column="id",
+    partition_defs=[
+        {"name": "p0", "values_less_than": 1000000},
+        {"name": "p1", "values_less_than": 2000000},
+        {"name": "p2", "values_less_than": "MAXVALUE"},
+    ],
+)
+```
+
+Supported partition strategies:
+
+| Strategy | Parameters | Description |
+|----------|------------|-------------|
+| `HASH` | `partition_column`, `partitions` | Hash partitioning by column value |
+| `KEY` | `partition_column`, `partitions` | Key partitioning (supports multi-column) |
+| `RANGE` | `partition_column`, `partition_defs` | Range partitioning with explicit boundaries |
+| `LIST` | `partition_column`, `partition_defs` | List partitioning with explicit value lists |
+| `BROADCAST` | (none) | Full table copy on every DN node |
+| `LOCALITY` | `locality` | Pin table to a specific storage node |
 
 ## Configuration Options
 
@@ -448,8 +528,12 @@ vectorstore = PolarDBXVectorStore(
 | `connection_retries` | int | 3 | Number of connection retry attempts |
 | `retry_delay` | float | 1.0 | Delay between retries in seconds |
 | `vector_index_name` | str | None | Vector index name for FORCE INDEX hints (auto-detected if None) |
-| `partition_by` | str | None | Partition strategy: `"HASH"` or `"KEY"` |
-| `partitions` | int | 0 | Number of partitions (only effective with `partition_by`) |
+| `partition_by` | str | None | Partition strategy: `"HASH"`, `"KEY"`, `"RANGE"`, or `"LIST"` |
+| `partitions` | int | 0 | Number of partitions (required for HASH/KEY) |
+| `partition_column` | str | `"id"` | Column to partition on |
+| `broadcast` | bool | False | Create a broadcast table (full copy on every DN) |
+| `locality` | str | None | Pin table to a specific DN node, e.g. `"dn=node-name"` |
+| `partition_defs` | list | None | Partition definitions for RANGE/LIST (see examples above) |
 | `**kwargs` | - | - | Additional connection arguments (e.g. `ssl_ca`, `ssl_cert`, `ssl_key`, `ssl_disabled`) |
 
 ## PolarDB-X Vector Functions Used
