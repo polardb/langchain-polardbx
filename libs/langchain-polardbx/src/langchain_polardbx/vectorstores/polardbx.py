@@ -7,6 +7,7 @@ PolarDB-X with native vector search capabilities.
 from __future__ import annotations
 
 import asyncio
+import difflib
 import json
 import logging
 import re
@@ -69,6 +70,70 @@ CREATE TABLE IF NOT EXISTS `{table_name}` (
     VECTOR INDEX (embedding) M={hnsw_m}{index_extra} DISTANCE={distance_function}
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
 """
+
+# PolarDBXVectorStore __init__ parameters (for typo detection in **kwargs)
+_OWN_PARAMS: set = {
+    "host",
+    "port",
+    "user",
+    "password",
+    "database",
+    "embedding",
+    "table_name",
+    "distance_strategy",
+    "hnsw_m",
+    "pool_size",
+    "pre_delete_table",
+    "embedding_dimension",
+    "ef_construction",
+    "connection_retries",
+    "retry_delay",
+    "vector_index_name",
+    "partition_by",
+    "partitions",
+    "partition_column",
+    "broadcast",
+    "locality",
+    "partition_defs",
+}
+
+# MySQL connector parameters that users may pass via **kwargs
+_KNOWN_MYSQL_KWARGS: set = {
+    # SSL/TLS
+    "ssl_ca",
+    "ssl_cert",
+    "ssl_key",
+    "ssl_verify_cert",
+    "ssl_verify_identity",
+    "ssl_disabled",
+    "ssl_options",
+    # Auth
+    "auth_plugin",
+    "get_server_pub_key",
+    "server_public_key_path",
+    # Connection behavior
+    "client_flag",
+    "compress",
+    "force_host",
+    "force_database",
+    "raise_on_warnings",
+    "collation",
+    "time_zone",
+    "sql_mode",
+    "use_unicode",
+    "connect_timeout",
+    "connection_timeout",
+    "allow_pre_hold",
+    "consume_results",
+    "raw",
+    # Pool config overrides
+    "charset",
+    "autocommit",
+    "pool_name",
+    "pool_reset_session",
+    # Other
+    "unix_socket",
+}
 
 # Partition clause is built dynamically by _build_partition_clause()
 
@@ -138,6 +203,34 @@ class PolarDBXVectorStore(VectorStore):
             # Search for similar documents
             results = vectorstore.similarity_search("Hello", k=2)
     """
+
+    @staticmethod
+    def _validate_kwargs(kwargs: Dict[str, Any]) -> None:
+        """Validate **kwargs to catch common typos and invalid arguments.
+
+        Checks each key against known PolarDBXVectorStore parameters and
+        common MySQL connection options. If a key looks like a typo of a
+        known parameter, raises TypeError with a suggestion.
+        """
+        for key in kwargs:
+            # Allow SSL/TLS params (ssl_ca, ssl_cert, etc.) and other
+            # known MySQL connector parameters
+            if key.startswith("ssl_") or key in _KNOWN_MYSQL_KWARGS:
+                continue
+            # Check if it's a typo of one of our own parameters
+            matches = difflib.get_close_matches(key, _OWN_PARAMS, n=3, cutoff=0.6)
+            if matches:
+                raise TypeError(
+                    f"PolarDBXVectorStore got an unexpected keyword "
+                    f"argument '{key}'. Did you mean '{matches[0]}'?"
+                )
+            raise TypeError(
+                f"PolarDBXVectorStore got an unexpected keyword "
+                f"argument '{key}'. This is not a recognized "
+                f"PolarDBXVectorStore parameter or MySQL connection "
+                f"option. Valid parameters: see PolarDBXVectorStore "
+                f"__init__ docstring."
+            )
 
     def __init__(
         self,
@@ -214,6 +307,9 @@ class PolarDBXVectorStore(VectorStore):
                 async connection pools (e.g. ssl_ca, ssl_cert, ssl_key,
                 ssl_disabled for SSL/TLS encryption).
         """
+        # Validate kwargs early to catch typos before any side effects
+        self._validate_kwargs(kwargs)
+
         try:
             import mysql.connector.pooling
         except ImportError as e:

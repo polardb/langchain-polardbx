@@ -236,6 +236,72 @@ class TestVectorStoreValidation:
 
 
 # ===========================================================================
+# 2b. **kwargs validation — typo detection and invalid argument handling
+# ===========================================================================
+
+
+class TestKwargsValidation:
+    """Test _validate_kwargs() catches typos before MySQL PoolError."""
+
+    def test_typo_dimension_suggests_embedding_dimension(self):
+        """'dimension' should suggest 'embedding_dimension'."""
+        with pytest.raises(TypeError, match="Did you mean 'embedding_dimension'"):
+            PolarDBXVectorStore._validate_kwargs({"dimension": 4})
+
+    def test_unknown_kwarg_raises_typeerror(self):
+        """Non-existent param like 'auto_create_table' raises TypeError."""
+        with pytest.raises(TypeError, match="unexpected keyword argument"):
+            PolarDBXVectorStore._validate_kwargs({"auto_create_table": True})
+
+    def test_ssl_ca_passes_through(self):
+        """SSL/TLS params should pass validation without error."""
+        PolarDBXVectorStore._validate_kwargs({"ssl_ca": "/path/ca.pem"})
+
+    def test_ssl_cert_passes_through(self):
+        PolarDBXVectorStore._validate_kwargs(
+            {"ssl_cert": "/path/cert.pem", "ssl_key": "/path/key.pem"}
+        )
+
+    def test_known_mysql_params_pass_through(self):
+        """Common MySQL connector params should pass validation."""
+        PolarDBXVectorStore._validate_kwargs(
+            {"client_flag": 1, "collation": "utf8mb4_bin"}
+        )
+
+    def test_empty_kwargs_passes(self):
+        """No kwargs should not raise."""
+        PolarDBXVectorStore._validate_kwargs({})
+
+    def test_init_rejects_typo_before_db_connection(self):
+        """__init__ raises TypeError for typo'd kwargs before DB connection."""
+        with pytest.raises(TypeError, match="Did you mean 'embedding_dimension'"):
+            PolarDBXVectorStore(
+                host="localhost",
+                port=3306,
+                user="u",
+                password="p",
+                database="db",
+                embedding=MagicMock(),
+                table_name="t",
+                dimension=4,
+            )
+
+    def test_init_rejects_nonexistent_param(self):
+        """__init__ raises TypeError for non-existent parameter."""
+        with pytest.raises(TypeError, match="unexpected keyword argument"):
+            PolarDBXVectorStore(
+                host="localhost",
+                port=3306,
+                user="u",
+                password="p",
+                database="db",
+                embedding=MagicMock(),
+                table_name="t",
+                auto_create_table=True,
+            )
+
+
+# ===========================================================================
 # 3. sql._build_partition_clause — standalone helper, all branches
 # ===========================================================================
 
