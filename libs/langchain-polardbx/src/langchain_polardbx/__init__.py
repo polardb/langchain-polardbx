@@ -13,4 +13,4 @@ try:
 except ImportError:
     __all__ = ["PolarDBXVectorStore", "NotSupportedError"]
 
-__version__ = "0.3.0"
+__version__ = "0.3.1"
