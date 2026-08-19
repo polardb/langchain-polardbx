@@ -424,20 +424,6 @@ class PolarDBXVectorStore(VectorStore):
                 "Use 'cosine' or 'euclidean' for old versions."
             )
 
-        # Validate partition/broadcast is not supported on v3 instances
-        # (v3 does not support vector indexes on partitioned/broadcast tables)
-        if (self._partition_by or self._broadcast) and self._capabilities.get(
-            "vec_distance", False
-        ):
-            self.close()
-            raise NotSupportedError(
-                "partition_by and broadcast are not supported on "
-                "PolarDB-X v3 instances because v3 does not support "
-                "vector indexes on partitioned/broadcast tables. "
-                "Omit the partition_by/broadcast parameter to create "
-                "a non-partitioned table."
-            )
-
         # Handle table creation
         if pre_delete_table:
             self._drop_table()
@@ -1376,7 +1362,19 @@ class PolarDBXVectorStore(VectorStore):
             return
         with self._get_cursor() as cursor:
             sql = self._build_create_table_sql(dimension)
-            cursor.execute(sql)
+            try:
+                cursor.execute(sql)
+            except Exception as e:
+                if self._partition_by or self._broadcast:
+                    raise NotSupportedError(
+                        f"Failed to create table '{self._table_name}' with "
+                        f"partition/broadcast and vector index. This "
+                        f"instance may not support vector indexes on "
+                        f"partitioned/broadcast tables. Try omitting "
+                        f"partition_by/broadcast, or check the PolarDB-X "
+                        f"version. Original error: {e}"
+                    ) from e
+                raise
             logger.info(
                 "Created table %s with vector dimension %d", self._table_name, dimension
             )
@@ -1388,7 +1386,19 @@ class PolarDBXVectorStore(VectorStore):
             return
         async with self._aget_cursor() as cursor:
             sql = self._build_create_table_sql(dimension)
-            await cursor.execute(sql)
+            try:
+                await cursor.execute(sql)
+            except Exception as e:
+                if self._partition_by or self._broadcast:
+                    raise NotSupportedError(
+                        f"Failed to create table '{self._table_name}' with "
+                        f"partition/broadcast and vector index. This "
+                        f"instance may not support vector indexes on "
+                        f"partitioned/broadcast tables. Try omitting "
+                        f"partition_by/broadcast, or check the PolarDB-X "
+                        f"version. Original error: {e}"
+                    ) from e
+                raise
             logger.info(
                 "Created table %s with vector dimension %d", self._table_name, dimension
             )
