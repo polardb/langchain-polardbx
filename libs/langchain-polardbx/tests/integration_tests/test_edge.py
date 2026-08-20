@@ -307,7 +307,7 @@ def test_persistence():
 def test_inner_product():
     """inner_product distance strategy requires v3 VEC_DISTANCE support.
     On old versions, initialization should raise NotSupportedError."""
-    from _helpers import NotSupportedError
+    from langchain_polardbx import NotSupportedError
 
     probe = make_store()
     v3 = is_v3(probe)

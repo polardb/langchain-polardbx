@@ -14,6 +14,7 @@ import re
 import time
 import uuid
 from contextlib import asynccontextmanager, contextmanager
+from dataclasses import dataclass
 from typing import (
     TYPE_CHECKING,
     Any,
@@ -28,6 +29,7 @@ from typing import (
     Sequence,
     Tuple,
     Type,
+    Union,
 )
 
 from langchain_core.documents import Document
@@ -45,6 +47,72 @@ class NotSupportedError(NotImplementedError):
     """Raised when a feature is not supported by the current PolarDB-X version."""
 
     pass
+
+
+def _validate_sql_literal(value: str, label: str) -> str:
+    """Validate a raw SQL expression string to prevent injection.
+
+    Used for Column.data_type and Column.default which are directly
+    interpolated into DDL (not parameterized).  Forbids characters
+    that could be used for SQL injection.
+
+    Args:
+        value: The SQL expression string to validate.
+        label: Human-readable label for error messages.
+
+    Returns:
+        The validated string.
+
+    Raises:
+        ValueError: If the value is empty or contains forbidden sequences.
+    """
+    if not isinstance(value, str) or not value.strip():
+        raise ValueError(
+            f"Invalid {label}: must be a non-empty string"
+        )
+    # Forbid SQL comment markers, statement separators, and newlines
+    dangerous = [";", "--", "/*", "*/", "\n", "\r"]
+    for marker in dangerous:
+        if marker in value:
+            raise ValueError(
+                f"Invalid {label}: contains forbidden sequence "
+                f"'{marker}'"
+            )
+    return value
+
+
+@dataclass
+class Column:
+    """Table column definition for custom schema.
+
+    Used when creating a new table with custom metadata columns.
+    When connecting to an existing table, only column name strings
+    are needed (the data_type is ignored).
+
+    Example:
+        .. code-block:: python
+
+            from langchain_polardbx import PolarDBXVectorStore, Column
+
+            store = PolarDBXVectorStore(
+                ...,
+                metadata_columns=[
+                    Column("price", "DECIMAL(10,2)"),
+                    Column("category", "VARCHAR(100)"),
+                ],
+            )
+    """
+
+    name: str
+    data_type: str  # SQL type, e.g. "VARCHAR(255)", "INT", "DECIMAL(10,2)"
+    nullable: bool = True
+    default: Optional[str] = None
+
+    def __post_init__(self) -> None:
+        """Validate data_type and default to prevent SQL injection."""
+        self.data_type = _validate_sql_literal(self.data_type, "data_type")
+        if self.default is not None:
+            self.default = _validate_sql_literal(self.default, "default")
 
 
 # Supported filter operators for dict-style filters
@@ -95,6 +163,11 @@ _OWN_PARAMS: set = {
     "broadcast",
     "locality",
     "partition_defs",
+    "id_column",
+    "content_column",
+    "embedding_column",
+    "metadata_json_column",
+    "metadata_columns",
 }
 
 # MySQL connector parameters that users may pass via **kwargs
@@ -213,6 +286,10 @@ class PolarDBXVectorStore(VectorStore):
         known parameter, raises TypeError with a suggestion.
         """
         for key in kwargs:
+            # Known parameters (including named params that may leak
+            # into **kwargs via framework unpacking) are always OK
+            if key in _OWN_PARAMS:
+                continue
             # Allow SSL/TLS params (ssl_ca, ssl_cert, etc.) and other
             # known MySQL connector parameters
             if key.startswith("ssl_") or key in _KNOWN_MYSQL_KWARGS:
@@ -257,6 +334,11 @@ class PolarDBXVectorStore(VectorStore):
         broadcast: bool = False,
         locality: Optional[str] = None,
         partition_defs: Optional[List[Dict[str, Any]]] = None,
+        id_column: Optional[str] = None,
+        content_column: Optional[str] = None,
+        embedding_column: Optional[str] = None,
+        metadata_json_column: Optional[str] = "metadata",
+        metadata_columns: Optional[List[Union[Column, str]]] = None,
         **kwargs: Any,
     ) -> None:
         """Initialize the PolarDB-X vector store.
@@ -303,6 +385,23 @@ class PolarDBXVectorStore(VectorStore):
                 strategies. Each dict has a "name" key and either
                 "values_less_than" (RANGE) or "values_in" (LIST).
                 Defaults to None.
+            id_column: Column name for the primary key. Defaults to "id".
+                Use when connecting to an existing table with a different
+                id column name.
+            content_column: Column name for the text content (mapped to
+                Document.page_content). Defaults to "text".
+            embedding_column: Column name for the vector embedding.
+                Defaults to "embedding".
+            metadata_json_column: Column name for the JSON metadata column
+                that stores unmapped metadata keys. Set to None to disable
+                (requires all metadata keys to be in metadata_columns).
+                Defaults to "metadata".
+            metadata_columns: List of column names (strings) or Column
+                objects to use as real table columns for metadata. Column
+                objects are used for DDL when creating a new table; string
+                names are used when connecting to an existing table. The
+                column name becomes the metadata key. Defaults to None
+                (all metadata goes to the JSON column).
             **kwargs: Additional connection arguments passed to both sync and
                 async connection pools (e.g. ssl_ca, ssl_cert, ssl_key,
                 ssl_disabled for SSL/TLS encryption).
@@ -334,12 +433,73 @@ class PolarDBXVectorStore(VectorStore):
         self._vector_index_name = vector_index_name
         self._partition_by = partition_by.upper() if partition_by else None
         self._partitions = partitions
-        self._partition_column = partition_column or "id"
+        self._partition_column = partition_column  # set default after id_column below
         self._broadcast = broadcast
         self._locality = locality
         self._partition_defs = partition_defs
         self._ef_construction = ef_construction
         self._conn_kwargs = kwargs  # Extra connection args (e.g. SSL params)
+
+        # Custom column configuration
+        self._id_column = id_column or "id"
+        self._content_column = content_column or "text"
+        self._embedding_column = embedding_column or "embedding"
+        self._metadata_json_column = metadata_json_column  # None = disabled
+
+        # Now that _id_column is set, finalize partition_column default
+        if self._partition_column is None:
+            self._partition_column = self._id_column
+
+        # Normalize metadata_columns: extract Column names, keep Column
+        # objects for DDL generation
+        self._metadata_column_objs: List[Column] = []
+        self._metadata_column_names: List[str] = []
+        if metadata_columns:
+            for mc in metadata_columns:
+                if isinstance(mc, Column):
+                    self._metadata_column_objs.append(mc)
+                    self._metadata_column_names.append(mc.name)
+                elif isinstance(mc, str):
+                    self._metadata_column_names.append(mc)
+                else:
+                    raise TypeError(
+                        f"metadata_columns items must be Column or str, "
+                        f"got {type(mc).__name__}"
+                    )
+
+        # Validate column identifiers
+        self._validate_identifier(self._id_column, "id_column")
+        self._validate_identifier(self._content_column, "content_column")
+        self._validate_identifier(self._embedding_column, "embedding_column")
+        if self._metadata_json_column is not None:
+            self._validate_identifier(
+                self._metadata_json_column, "metadata_json_column"
+            )
+        for col_name in self._metadata_column_names:
+            self._validate_identifier(col_name, "metadata column name")
+
+        # Validate no overlap between core columns and metadata columns
+        core_cols = {self._id_column, self._content_column, self._embedding_column}
+        if self._metadata_json_column:
+            core_cols.add(self._metadata_json_column)
+        overlap = core_cols & set(self._metadata_column_names)
+        if overlap:
+            raise ValueError(
+                f"Column name conflict: {overlap} is both a core column "
+                f"and a metadata column. Use different names."
+            )
+
+        # If no JSON column and no metadata_columns, all metadata is lost
+        if (
+            self._metadata_json_column is None
+            and not self._metadata_column_names
+        ):
+            raise ValueError(
+                "metadata_json_column is None (disabled) and "
+                "metadata_columns is empty. There is no place to "
+                "store metadata. Either set metadata_json_column "
+                "to a column name, or provide metadata_columns."
+            )
 
         # Capabilities detected at init time (filled by _detect_capabilities)
         self._capabilities: Dict[str, bool] = {}
@@ -926,6 +1086,17 @@ class PolarDBXVectorStore(VectorStore):
             partition_defs=self._partition_defs,
         )
 
+    @property
+    def _has_custom_columns(self) -> bool:
+        """True if custom column configuration differs from defaults."""
+        return (
+            self._id_column != "id"
+            or self._content_column != "text"
+            or self._embedding_column != "embedding"
+            or bool(self._metadata_column_names)
+            or self._metadata_json_column != "metadata"
+        )
+
     def _build_create_table_sql(self, dimension: int) -> str:
         """Build the CREATE TABLE SQL with optional partition clause.
 
@@ -935,6 +1106,41 @@ class PolarDBXVectorStore(VectorStore):
         Returns:
             The complete CREATE TABLE SQL statement.
         """
+        if self._has_custom_columns:
+            base_sql = self._build_create_table_sql_custom(dimension)
+        else:
+            # Build optional EF_CONSTRUCTION clause (v3 only)
+            index_extra = ""
+            if self._ef_construction is not None and self._capabilities.get(
+                "vec_distance", False
+            ):
+                index_extra = f" EF_CONSTRUCTION={self._ef_construction}"
+
+            base_sql = SQL_CREATE_TABLE.format(
+                table_name=self._table_name,
+                dimension=dimension,
+                hnsw_m=self._hnsw_m,
+                distance_function=self._distance_strategy.upper(),
+                index_extra=index_extra,
+            )
+        partition_clause = self._build_partition_clause()
+        if partition_clause:
+            return base_sql.rstrip() + partition_clause
+        return base_sql
+
+    def _build_create_table_sql_custom(self, dimension: int) -> str:
+        """Build CREATE TABLE SQL with custom column definitions.
+
+        Generates DDL using the user-specified column names and
+        metadata column definitions. Falls back to sensible defaults
+        for the core columns (id, content, embedding).
+
+        Args:
+            dimension: The vector embedding dimension.
+
+        Returns:
+            The CREATE TABLE SQL statement.
+        """
         # Build optional EF_CONSTRUCTION clause (v3 only)
         index_extra = ""
         if self._ef_construction is not None and self._capabilities.get(
@@ -942,17 +1148,254 @@ class PolarDBXVectorStore(VectorStore):
         ):
             index_extra = f" EF_CONSTRUCTION={self._ef_construction}"
 
-        base_sql = SQL_CREATE_TABLE.format(
-            table_name=self._table_name,
-            dimension=dimension,
-            hnsw_m=self._hnsw_m,
-            distance_function=self._distance_strategy.upper(),
-            index_extra=index_extra,
+        lines: List[str] = []
+        lines.append(
+            f"    `{self._id_column}` VARCHAR(36) PRIMARY KEY"
         )
-        partition_clause = self._build_partition_clause()
-        if partition_clause:
-            return base_sql.rstrip() + partition_clause
-        return base_sql
+        lines.append(
+            f"    `{self._content_column}` LONGTEXT NOT NULL"
+        )
+        if self._metadata_json_column is not None:
+            lines.append(
+                f"    `{self._metadata_json_column}` JSON"
+            )
+        lines.append(
+            f"    `{self._embedding_column}` VECTOR({dimension}) NOT NULL"
+        )
+        # Add metadata columns: use Column objects when available
+        # (for new tables), fall back to TEXT for string-only names
+        col_obj_map = {c.name: c for c in self._metadata_column_objs}
+        for name in self._metadata_column_names:
+            col = col_obj_map.get(name)
+            if col is not None:
+                col_def = f"    `{name}` {col.data_type}"
+                if not col.nullable:
+                    col_def += " NOT NULL"
+                if col.default is not None:
+                    col_def += f" DEFAULT {col.default}"
+            else:
+                # String-only column name: use TEXT as default type
+                col_def = f"    `{name}` TEXT"
+            lines.append(col_def)
+        # VECTOR INDEX
+        lines.append(
+            f"    VECTOR INDEX (`{self._embedding_column}`) "
+            f"M={self._hnsw_m}{index_extra} "
+            f"DISTANCE={self._distance_strategy.upper()}"
+        )
+
+        inner = ",\n".join(lines)
+        return (
+            f"CREATE TABLE IF NOT EXISTS `{self._table_name}` (\n"
+            f"{inner}\n"
+            f") ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 "
+            f"COLLATE=utf8mb4_unicode_ci\n"
+        )
+
+    def _build_upsert_sql(self) -> str:
+        """Build INSERT ... ON DUPLICATE KEY UPDATE SQL.
+
+        Uses custom column names when configured, otherwise falls
+        back to the static SQL_UPSERT template.
+
+        Returns:
+            The UPSERT SQL statement.
+        """
+        if not self._has_custom_columns:
+            return SQL_UPSERT.format(table_name=self._table_name)
+
+        # Build column list and value placeholders in the same
+        # order: id, content, [json], embedding, [metadata cols...]
+        cols: List[str] = [f"`{self._id_column}`", f"`{self._content_column}`"]
+        placeholders: List[str] = ["%s", "%s"]
+        if self._metadata_json_column is not None:
+            cols.append(f"`{self._metadata_json_column}`")
+            placeholders.append("%s")
+        cols.append(f"`{self._embedding_column}`")
+        placeholders.append("VEC_FROMTEXT(%s)")
+        for name in self._metadata_column_names:
+            cols.append(f"`{name}`")
+            placeholders.append("%s")
+
+        col_list = ", ".join(cols)
+        val_list = ", ".join(placeholders)
+
+        # ON DUPLICATE KEY UPDATE: all columns except the primary key
+        update_cols = cols[1:]
+        update_clause = ",\n    ".join(
+            f"{c} = VALUES({c})" for c in update_cols
+        )
+
+        return (
+            f"INSERT INTO `{self._table_name}` ({col_list})\n"
+            f"VALUES ({val_list})\n"
+            f"ON DUPLICATE KEY UPDATE\n    {update_clause}\n"
+        )
+
+    def _build_upsert_values(
+        self, id: str, text: str, metadata: dict, vector_str: str
+    ) -> tuple:
+        """Build the values tuple matching _build_upsert_sql column order.
+
+        When custom metadata columns are configured, extracts mapped
+        keys into their own columns and puts the remaining metadata
+        into the JSON column (if present).
+
+        Args:
+            id: Document ID.
+            text: Document text content.
+            metadata: Metadata dictionary.
+            vector_str: Pre-serialized embedding vector string.
+
+        Returns:
+            Tuple of values in the same order as the SQL placeholders.
+        """
+        if not self._has_custom_columns:
+            return (id, text, json.dumps(metadata), vector_str)
+
+        values: list = [id, text]
+        if self._metadata_json_column is not None:
+            # Keys that are mapped to dedicated columns are excluded
+            # from the JSON blob; everything else is serialized.
+            remaining = {
+                k: v
+                for k, v in metadata.items()
+                if k not in self._metadata_column_names
+            }
+            values.append(json.dumps(remaining))
+        values.append(vector_str)
+        col_obj_map = {c.name: c for c in self._metadata_column_objs}
+        for name in self._metadata_column_names:
+            val = metadata.get(name)
+            if val is None:
+                col = col_obj_map.get(name)
+                if col is not None and not col.nullable:
+                    raise ValueError(
+                        f"Column '{name}' is NOT NULL but no value "
+                        f"was provided in metadata. Provide a value "
+                        f"for '{name}' in the metadata dict, or set "
+                        f"nullable=True on the Column definition."
+                    )
+            values.append(val)
+        return tuple(values)
+
+    def _build_select_columns(self) -> str:
+        """Build the SELECT column list with stable aliases.
+
+        Core columns (id, text, metadata) are aliased so that
+        result-mapping code can always access them as
+        ``record["id"]``, ``record["text"]``, ``record["metadata"]``
+        regardless of the actual column names.
+
+        Returns:
+            Column list string for use in a SELECT clause.
+        """
+        if not self._has_custom_columns:
+            return "id, text, metadata"
+
+        cols: List[str] = [
+            f"`{self._id_column}` AS `id`",
+            f"`{self._content_column}` AS `text`",
+        ]
+        if self._metadata_json_column is not None:
+            cols.append(
+                f"`{self._metadata_json_column}` AS `metadata`"
+            )
+        for name in self._metadata_column_names:
+            cols.append(f"`{name}`")
+        return ", ".join(cols)
+
+    def _build_search_sql(
+        self,
+        distance_func: str,
+        index_hint: str,
+        where_clause: str,
+    ) -> str:
+        """Build the similarity search SQL.
+
+        Args:
+            distance_func: Distance function name (e.g. VEC_DISTANCE).
+            index_hint: Index hint clause (e.g. "/*+ ... */").
+            where_clause: Optional WHERE clause (may be empty).
+
+        Returns:
+            The complete SELECT ... ORDER BY ... LIMIT SQL.
+        """
+        select_cols = self._build_select_columns()
+        emb_col = self._embedding_column if self._has_custom_columns else "embedding"
+
+        return (
+            f"SELECT {select_cols}, "
+            f"{distance_func}(`{emb_col}`, VEC_FROMTEXT(%s)) AS distance "
+            f"FROM `{self._table_name}`{index_hint} "
+            f"{where_clause} "
+            f"ORDER BY distance LIMIT %s"
+        )
+
+    def _build_get_by_ids_sql(self, placeholders: str) -> str:
+        """Build the get-by-ids SQL.
+
+        Args:
+            placeholders: Comma-separated "%s" placeholders.
+
+        Returns:
+            The SELECT ... WHERE id IN (...) SQL.
+        """
+        select_cols = self._build_select_columns()
+        id_col = self._id_column if self._has_custom_columns else "id"
+        return (
+            f"SELECT {select_cols} FROM `{self._table_name}` "
+            f"WHERE `{id_col}` IN ({placeholders})"
+        )
+
+    def _build_delete_by_ids_sql(self, placeholders: str) -> str:
+        """Build the delete-by-ids SQL.
+
+        Args:
+            placeholders: Comma-separated "%s" placeholders.
+
+        Returns:
+            The DELETE ... WHERE id IN (...) SQL.
+        """
+        id_col = self._id_column if self._has_custom_columns else "id"
+        return (
+            f"DELETE FROM `{self._table_name}` "
+            f"WHERE `{id_col}` IN ({placeholders})"
+        )
+
+    def _record_to_metadata(self, record: Any) -> dict:
+        """Reconstruct metadata dict from a database record.
+
+        For the default schema, simply deserializes the JSON column.
+        For custom columns, merges the JSON column (if present) with
+        the mapped metadata column values.
+
+        Args:
+            record: A cursor row (dict-like).
+
+        Returns:
+            The metadata dictionary.
+        """
+        if not self._has_custom_columns:
+            metadata = record["metadata"]
+            if isinstance(metadata, str):
+                metadata = json.loads(metadata)
+            return metadata or {}
+
+        metadata: dict = {}
+        # Merge JSON column values first
+        if self._metadata_json_column is not None:
+            json_data = record.get("metadata")  # aliased
+            if isinstance(json_data, str):
+                json_data = json.loads(json_data)
+            if json_data:
+                metadata.update(json_data)
+        # Mapped column values override (they are the "real" typed columns)
+        for name in self._metadata_column_names:
+            val = record.get(name)
+            if val is not None:
+                metadata[name] = val
+        return metadata
 
     def _detect_vector_index_name(self) -> Optional[str]:
         """Auto-detect the vector index name.
@@ -1489,14 +1932,14 @@ class PolarDBXVectorStore(VectorStore):
         placeholders = ", ".join(["%s"] * len(ids))
         # Use VEC_TOTEXT if available (v3), otherwise CAST(embedding AS CHAR)
         emb_expr = (
-            "VEC_TOTEXT(embedding)"
+            f"VEC_TOTEXT(`{self._embedding_column}`)"
             if self._capabilities.get("vec_totext", False)
-            else "CAST(embedding AS CHAR)"
+            else f"CAST(`{self._embedding_column}` AS CHAR)"
         )
         sql = f"""
-        SELECT id, {emb_expr} as emb_str
+        SELECT `{self._id_column}` AS id, {emb_expr} as emb_str
         FROM `{self._table_name}`
-        WHERE id IN ({placeholders})
+        WHERE `{self._id_column}` IN ({placeholders})
         """
         id_to_emb: Dict[str, List[float]] = {}
         try:
@@ -1530,14 +1973,14 @@ class PolarDBXVectorStore(VectorStore):
         placeholders = ", ".join(["%s"] * len(ids))
         # Use VEC_TOTEXT if available (v3), otherwise CAST(embedding AS CHAR)
         emb_expr = (
-            "VEC_TOTEXT(embedding)"
+            f"VEC_TOTEXT(`{self._embedding_column}`)"
             if self._capabilities.get("vec_totext", False)
-            else "CAST(embedding AS CHAR)"
+            else f"CAST(`{self._embedding_column}` AS CHAR)"
         )
         sql = f"""
-        SELECT id, {emb_expr} as emb_str
+        SELECT `{self._id_column}` AS id, {emb_expr} as emb_str
         FROM `{self._table_name}`
-        WHERE id IN ({placeholders})
+        WHERE `{self._id_column}` IN ({placeholders})
         """
         id_to_emb: Dict[str, List[float]] = {}
         try:
@@ -1598,9 +2041,37 @@ class PolarDBXVectorStore(VectorStore):
                     "Keys must start with a letter or underscore, "
                     "and contain only alphanumeric characters and underscores."
                 )
-            # Use JSON_EXTRACT for numeric comparisons, JSON_UNQUOTE for string
-            json_path_str = f"JSON_UNQUOTE(JSON_EXTRACT(metadata, '$.{key}'))"
-            json_path_num = f"JSON_EXTRACT(metadata, '$.{key}')"
+            # Determine filter target: mapped column, JSON, or error
+            if self._has_custom_columns:
+                if key in self._metadata_column_names:
+                    # Mapped column: direct column reference
+                    json_path_str = f"`{key}`"
+                    json_path_num = f"`{key}`"
+                elif self._metadata_json_column is not None:
+                    # JSON column: use JSON_EXTRACT on custom column
+                    json_col = self._metadata_json_column
+                    json_path_str = (
+                        f"JSON_UNQUOTE(JSON_EXTRACT(`{json_col}`, "
+                        f"'$.{key}'))"
+                    )
+                    json_path_num = (
+                        f"JSON_EXTRACT(`{json_col}`, '$.{key}')"
+                    )
+                else:
+                    raise ValueError(
+                        f"Cannot filter on '{key}': no JSON metadata "
+                        f"column configured and '{key}' is not a "
+                        f"mapped metadata column. Either enable "
+                        f"metadata_json_column or add '{key}' to "
+                        f"metadata_columns."
+                    )
+            else:
+                # Default schema: use hardcoded metadata column
+                json_path_str = (
+                    f"JSON_UNQUOTE(JSON_EXTRACT(metadata, "
+                    f"'$.{key}'))"
+                )
+                json_path_num = f"JSON_EXTRACT(metadata, '$.{key}')"
 
             if isinstance(value, dict):
                 # Operator-based filter: {"price": {"$gt": 100}}
@@ -1699,7 +2170,7 @@ class PolarDBXVectorStore(VectorStore):
 
         # Insert in batches (executemany uses prepared statements internally)
         with self._get_cursor() as cursor:
-            sql = SQL_UPSERT.format(table_name=self._table_name)
+            sql = self._build_upsert_sql()
 
             for i in range(0, len(texts_list), batch_size):
                 batch_end = min(i + batch_size, len(texts_list))
@@ -1708,11 +2179,8 @@ class PolarDBXVectorStore(VectorStore):
                 for j in range(i, batch_end):
                     vector_str = self._vector_to_string(embeddings[j])
                     batch_values.append(
-                        (
-                            ids[j],
-                            texts_list[j],
-                            json.dumps(metadatas[j]),
-                            vector_str,
+                        self._build_upsert_values(
+                            ids[j], texts_list[j], metadatas[j], vector_str
                         )
                     )
 
@@ -1768,7 +2236,7 @@ class PolarDBXVectorStore(VectorStore):
 
         # Insert in batches
         async with self._aget_cursor() as cursor:
-            sql = SQL_UPSERT.format(table_name=self._table_name)
+            sql = self._build_upsert_sql()
 
             for i in range(0, len(texts_list), batch_size):
                 batch_end = min(i + batch_size, len(texts_list))
@@ -1777,11 +2245,8 @@ class PolarDBXVectorStore(VectorStore):
                 for j in range(i, batch_end):
                     vector_str = self._vector_to_string(embeddings[j])
                     batch_values.append(
-                        (
-                            ids[j],
-                            texts_list[j],
-                            json.dumps(metadatas[j]),
-                            vector_str,
+                        self._build_upsert_values(
+                            ids[j], texts_list[j], metadatas[j], vector_str
                         )
                     )
 
@@ -1968,7 +2433,7 @@ class PolarDBXVectorStore(VectorStore):
 
         # Insert in batches
         with self._get_cursor() as cursor:
-            sql = SQL_UPSERT.format(table_name=self._table_name)
+            sql = self._build_upsert_sql()
 
             for i in range(0, len(texts), batch_size):
                 batch_end = min(i + batch_size, len(texts))
@@ -1977,11 +2442,8 @@ class PolarDBXVectorStore(VectorStore):
                 for j in range(i, batch_end):
                     vector_str = self._vector_to_string(embeddings[j])
                     batch_values.append(
-                        (
-                            ids[j],
-                            texts[j],
-                            json.dumps(metadatas[j]),
-                            vector_str,
+                        self._build_upsert_values(
+                            ids[j], texts[j], metadatas[j], vector_str
                         )
                     )
 
@@ -2053,7 +2515,7 @@ class PolarDBXVectorStore(VectorStore):
 
         # Insert in batches
         async with self._aget_cursor() as cursor:
-            sql = SQL_UPSERT.format(table_name=self._table_name)
+            sql = self._build_upsert_sql()
 
             for i in range(0, len(texts), batch_size):
                 batch_end = min(i + batch_size, len(texts))
@@ -2062,11 +2524,8 @@ class PolarDBXVectorStore(VectorStore):
                 for j in range(i, batch_end):
                     vector_str = self._vector_to_string(embeddings[j])
                     batch_values.append(
-                        (
-                            ids[j],
-                            texts[j],
-                            json.dumps(metadatas[j]),
-                            vector_str,
+                        self._build_upsert_values(
+                            ids[j], texts[j], metadatas[j], vector_str
                         )
                     )
 
@@ -2152,7 +2611,7 @@ class PolarDBXVectorStore(VectorStore):
 
         # Upsert in batches (using SQL_UPSERT which does ON DUPLICATE KEY UPDATE)
         with self._get_cursor() as cursor:
-            sql = SQL_UPSERT.format(table_name=self._table_name)
+            sql = self._build_upsert_sql()
 
             for i in range(0, len(texts), batch_size):
                 batch_end = min(i + batch_size, len(texts))
@@ -2161,11 +2620,8 @@ class PolarDBXVectorStore(VectorStore):
                 for j in range(i, batch_end):
                     vector_str = self._vector_to_string(embeddings[j])
                     batch_values.append(
-                        (
-                            ids[j],
-                            texts[j],
-                            json.dumps(metadatas[j]),
-                            vector_str,
+                        self._build_upsert_values(
+                            ids[j], texts[j], metadatas[j], vector_str
                         )
                     )
 
@@ -2236,7 +2692,7 @@ class PolarDBXVectorStore(VectorStore):
 
         # Upsert in batches (using SQL_UPSERT which does ON DUPLICATE KEY UPDATE)
         async with self._aget_cursor() as cursor:
-            sql = SQL_UPSERT.format(table_name=self._table_name)
+            sql = self._build_upsert_sql()
 
             for i in range(0, len(texts), batch_size):
                 batch_end = min(i + batch_size, len(texts))
@@ -2245,11 +2701,8 @@ class PolarDBXVectorStore(VectorStore):
                 for j in range(i, batch_end):
                     vector_str = self._vector_to_string(embeddings[j])
                     batch_values.append(
-                        (
-                            ids[j],
-                            texts[j],
-                            json.dumps(metadatas[j]),
-                            vector_str,
+                        self._build_upsert_values(
+                            ids[j], texts[j], metadatas[j], vector_str
                         )
                     )
 
@@ -2305,14 +2758,14 @@ class PolarDBXVectorStore(VectorStore):
             metadatas = [{} for _ in texts]
 
         with self._get_cursor() as cursor:
-            sql = SQL_UPSERT.format(table_name=self._table_name)
+            sql = self._build_upsert_sql()
             for i in range(0, len(texts), batch_size):
                 batch_end = min(i + batch_size, len(texts))
                 batch_values = [
-                    (
+                    self._build_upsert_values(
                         ids[j],
                         texts[j],
-                        json.dumps(metadatas[j]),
+                        metadatas[j],
                         self._vector_to_string(embeddings[j]),
                     )
                     for j in range(i, batch_end)
@@ -2354,14 +2807,14 @@ class PolarDBXVectorStore(VectorStore):
             metadatas = [{} for _ in texts]
 
         async with self._aget_cursor() as cursor:
-            sql = SQL_UPSERT.format(table_name=self._table_name)
+            sql = self._build_upsert_sql()
             for i in range(0, len(texts), batch_size):
                 batch_end = min(i + batch_size, len(texts))
                 batch_values = [
-                    (
+                    self._build_upsert_values(
                         ids[j],
                         texts[j],
-                        json.dumps(metadatas[j]),
+                        metadatas[j],
                         self._vector_to_string(embeddings[j]),
                     )
                     for j in range(i, batch_end)
@@ -2492,8 +2945,7 @@ class PolarDBXVectorStore(VectorStore):
         # Build and execute query
         query_vector_str = self._vector_to_string(embedding)
 
-        sql = SQL_SEARCH.format(
-            table_name=self._table_name,
+        sql = self._build_search_sql(
             distance_func=distance_func,
             index_hint=index_hint,
             where_clause=where_clause,
@@ -2517,9 +2969,7 @@ class PolarDBXVectorStore(VectorStore):
                     if score_threshold is not None and distance > score_threshold:
                         continue
 
-                    metadata = record["metadata"]
-                    if isinstance(metadata, str):
-                        metadata = json.loads(metadata)
+                    metadata = self._record_to_metadata(record)
 
                     doc = Document(
                         id=record["id"],
@@ -2655,8 +3105,7 @@ class PolarDBXVectorStore(VectorStore):
         # Build and execute query
         query_vector_str = self._vector_to_string(embedding)
 
-        sql = SQL_SEARCH.format(
-            table_name=self._table_name,
+        sql = self._build_search_sql(
             distance_func=distance_func,
             index_hint=index_hint,
             where_clause=where_clause,
@@ -2683,9 +3132,7 @@ class PolarDBXVectorStore(VectorStore):
                     if score_threshold is not None and distance > score_threshold:
                         continue
 
-                    metadata = record["metadata"]
-                    if isinstance(metadata, str):
-                        metadata = json.loads(metadata)
+                    metadata = self._record_to_metadata(record)
 
                     doc = Document(
                         id=record["id"],
@@ -2725,9 +3172,7 @@ class PolarDBXVectorStore(VectorStore):
         try:
             with self._get_cursor() as cursor:
                 placeholders = ",".join(["%s"] * len(ids))
-                sql = SQL_DELETE_BY_IDS.format(
-                    table_name=self._table_name, placeholders=placeholders
-                )
+                sql = self._build_delete_by_ids_sql(placeholders)
                 cursor.execute(sql, ids)
 
             logger.info("Deleted %d vectors from table %s", len(ids), self._table_name)
@@ -2763,9 +3208,7 @@ class PolarDBXVectorStore(VectorStore):
         try:
             async with self._aget_cursor() as cursor:
                 placeholders = ",".join(["%s"] * len(ids))
-                sql = SQL_DELETE_BY_IDS.format(
-                    table_name=self._table_name, placeholders=placeholders
-                )
+                sql = self._build_delete_by_ids_sql(placeholders)
                 await cursor.execute(sql, ids)
 
             logger.info("Deleted %d vectors from table %s", len(ids), self._table_name)
@@ -2796,16 +3239,12 @@ class PolarDBXVectorStore(VectorStore):
         try:
             with self._get_cursor() as cursor:
                 placeholders = ",".join(["%s"] * len(ids))
-                sql = SQL_GET_BY_IDS.format(
-                    table_name=self._table_name, placeholders=placeholders
-                )
+                sql = self._build_get_by_ids_sql(placeholders)
                 cursor.execute(sql, list(ids))
 
                 documents = []
                 for record in cursor:
-                    metadata = record["metadata"]
-                    if isinstance(metadata, str):
-                        metadata = json.loads(metadata)
+                    metadata = self._record_to_metadata(record)
 
                     documents.append(
                         Document(
@@ -2841,16 +3280,12 @@ class PolarDBXVectorStore(VectorStore):
         try:
             async with self._aget_cursor() as cursor:
                 placeholders = ",".join(["%s"] * len(ids))
-                sql = SQL_GET_BY_IDS.format(
-                    table_name=self._table_name, placeholders=placeholders
-                )
+                sql = self._build_get_by_ids_sql(placeholders)
                 await cursor.execute(sql, list(ids))
 
                 documents = []
                 async for record in cursor:
-                    metadata = record["metadata"]
-                    if isinstance(metadata, str):
-                        metadata = json.loads(metadata)
+                    metadata = self._record_to_metadata(record)
 
                     documents.append(
                         Document(
@@ -3552,8 +3987,9 @@ class PolarDBXVectorStore(VectorStore):
         """
         where_clause, params = self._build_filter_clause(filter)
 
+        select_cols = self._build_select_columns()
         sql = f"""
-        SELECT id, text, metadata
+        SELECT {select_cols}
         FROM `{self._table_name}`
         {where_clause}
         LIMIT %s
@@ -3567,9 +4003,7 @@ class PolarDBXVectorStore(VectorStore):
 
                 documents = []
                 for record in cursor:
-                    metadata = record["metadata"]
-                    if isinstance(metadata, str):
-                        metadata = json.loads(metadata)
+                    metadata = self._record_to_metadata(record)
 
                     documents.append(
                         Document(
@@ -3646,7 +4080,8 @@ class PolarDBXVectorStore(VectorStore):
         """
         with self._get_cursor() as cursor:
             cursor.execute(
-                f"SELECT 1 FROM `{self._table_name}` WHERE id = %s LIMIT 1",
+                f"SELECT 1 FROM `{self._table_name}` "
+                f"WHERE `{self._id_column}` = %s LIMIT 1",
                 (id,),
             )
             return cursor.fetchone() is not None
@@ -3667,8 +4102,9 @@ class PolarDBXVectorStore(VectorStore):
         """
         where_clause, params = self._build_filter_clause(filter)
 
+        select_cols = self._build_select_columns()
         sql = f"""
-        SELECT id, text, metadata
+        SELECT {select_cols}
         FROM `{self._table_name}`
         {where_clause}
         LIMIT %s
@@ -3682,9 +4118,7 @@ class PolarDBXVectorStore(VectorStore):
 
                 documents = []
                 async for record in cursor:
-                    metadata = record["metadata"]
-                    if isinstance(metadata, str):
-                        metadata = json.loads(metadata)
+                    metadata = self._record_to_metadata(record)
 
                     documents.append(
                         Document(
@@ -3749,7 +4183,8 @@ class PolarDBXVectorStore(VectorStore):
         """
         async with self._aget_cursor() as cursor:
             await cursor.execute(
-                f"SELECT 1 FROM `{self._table_name}` WHERE id = %s LIMIT 1",
+                f"SELECT 1 FROM `{self._table_name}` "
+                f"WHERE `{self._id_column}` = %s LIMIT 1",
                 (id,),
             )
             return await cursor.fetchone() is not None

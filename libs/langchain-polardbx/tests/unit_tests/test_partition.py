@@ -44,6 +44,15 @@ def _make_store(**kwargs):
     vs._ef_construction = None
     vs._capabilities = {}
     vs._table_name = "test_table"
+    # Custom column defaults
+    vs._id_column = kwargs.get("id_column", "id")
+    vs._content_column = kwargs.get("content_column", "text")
+    vs._embedding_column = kwargs.get("embedding_column", "embedding")
+    vs._metadata_json_column = kwargs.get("metadata_json_column", "metadata")
+    vs._metadata_column_objs = kwargs.get("metadata_column_objs", [])
+    vs._metadata_column_names = kwargs.get("metadata_column_names", [])
+    # partition_column defaults to id_column (mirrors __init__ logic)
+    vs._partition_column = kwargs.get("partition_column") or vs._id_column
     return vs
 
 
@@ -700,3 +709,1004 @@ class TestPartitionModuleIndependence:
             "VectorStore._build_partition_clause should import from "
             "langchain_polardbx._partition, not langchain_polardbx.sql"
         )
+
+
+# ===========================================================================
+# 7. Custom column support — Column class + constructor validation
+# ===========================================================================
+
+
+class TestColumnDataclass:
+    """Test the Column dataclass."""
+
+    def test_basic_creation(self):
+        from langchain_polardbx import Column
+
+        col = Column("price", "DECIMAL(10,2)")
+        assert col.name == "price"
+        assert col.data_type == "DECIMAL(10,2)"
+        assert col.nullable is True
+        assert col.default is None
+
+    def test_with_options(self):
+        from langchain_polardbx import Column
+
+        col = Column("category", "VARCHAR(100)", nullable=False, default="'misc'")
+        assert col.nullable is False
+        assert col.default == "'misc'"
+
+    def test_import_from_vectorstores(self):
+        from langchain_polardbx.vectorstores import Column
+
+        assert Column.__name__ == "Column"
+
+    def test_import_from_top_level(self):
+        from langchain_polardbx import Column
+
+        assert Column.__name__ == "Column"
+
+
+class TestCustomColumnValidation:
+    """Test constructor validation for custom column params."""
+
+    def test_column_name_conflict_raises(self):
+        """metadata_columns can't include core column names."""
+        with pytest.raises(ValueError, match="Column name conflict"):
+            PolarDBXVectorStore(
+                host="localhost",
+                port=3306,
+                user="u",
+                password="p",
+                database="db",
+                embedding=MagicMock(),
+                table_name="t",
+                id_column="product_id",
+                metadata_columns=["product_id"],
+            )
+
+    def test_embedding_column_conflict_raises(self):
+        """metadata_columns can't include the embedding column."""
+        with pytest.raises(ValueError, match="Column name conflict"):
+            PolarDBXVectorStore(
+                host="localhost",
+                port=3306,
+                user="u",
+                password="p",
+                database="db",
+                embedding=MagicMock(),
+                table_name="t",
+                embedding_column="vec",
+                metadata_columns=["vec"],
+            )
+
+    def test_no_json_column_no_metadata_columns_raises(self):
+        """Can't disable JSON column without metadata_columns."""
+        with pytest.raises(ValueError, match="no place to store metadata"):
+            PolarDBXVectorStore(
+                host="localhost",
+                port=3306,
+                user="u",
+                password="p",
+                database="db",
+                embedding=MagicMock(),
+                table_name="t",
+                metadata_json_column=None,
+            )
+
+    def test_no_json_column_with_metadata_columns_ok(self):
+        """Disabling JSON column is OK if metadata_columns is provided.
+
+        The error should be a connection error (host unreachable), not
+        a validation error — proving validation passed.
+        """
+        with pytest.raises(Exception) as exc_info:
+            PolarDBXVectorStore(
+                host="localhost",
+                port=3306,
+                user="u",
+                password="p",
+                database="db",
+                embedding=MagicMock(),
+                table_name="t",
+                metadata_json_column=None,
+                metadata_columns=["price", "category"],
+            )
+        # Should NOT be a ValueError about metadata storage
+        assert "no place to store metadata" not in str(exc_info.value)
+
+    def test_invalid_type_in_metadata_columns_raises(self):
+        """Non-Column, non-str items in metadata_columns raise TypeError."""
+        with pytest.raises(TypeError, match="must be Column or str"):
+            PolarDBXVectorStore(
+                host="localhost",
+                port=3306,
+                user="u",
+                password="p",
+                database="db",
+                embedding=MagicMock(),
+                table_name="t",
+                metadata_columns=[123],
+            )
+
+    def test_invalid_identifier_in_id_column_raises(self):
+        """SQL injection attempt in id_column is rejected."""
+        with pytest.raises(ValueError, match="Invalid id_column"):
+            PolarDBXVectorStore(
+                host="localhost",
+                port=3306,
+                user="u",
+                password="p",
+                database="db",
+                embedding=MagicMock(),
+                table_name="t",
+                id_column="id; DROP TABLE",
+            )
+
+    def test_validate_kwargs_accepts_new_params(self):
+        """New param names should not trigger typo detection."""
+        # These should all pass without raising TypeError
+        PolarDBXVectorStore._validate_kwargs(
+            {"id_column": "pid", "content_column": "desc"}
+        )
+        PolarDBXVectorStore._validate_kwargs(
+            {"embedding_column": "vec", "metadata_json_column": "extra"}
+        )
+        PolarDBXVectorStore._validate_kwargs({"metadata_columns": []})
+
+    def test_default_column_names(self):
+        """When not passing custom columns, defaults are used."""
+        # We can't fully init without a DB, but we can verify the
+        # validation logic doesn't raise for default values by catching
+        # the connection error (not a ValueError from validation).
+        with pytest.raises(Exception) as exc_info:
+            PolarDBXVectorStore(
+                host="localhost",
+                port=3306,
+                user="u",
+                password="p",
+                database="db",
+                embedding=MagicMock(),
+                table_name="t",
+            )
+        # Should fail at connection, not at validation
+        assert "Column name conflict" not in str(exc_info.value)
+        assert "no place to store metadata" not in str(exc_info.value)
+
+
+# ===========================================================================
+# 8. Custom column support — DDL generation
+# ===========================================================================
+
+
+class TestCreateTableSqlCustom:
+    """Test _build_create_table_sql with custom columns."""
+
+    def test_default_uses_static_template(self):
+        """No custom columns → same SQL_CREATE_TABLE template."""
+        vs = _make_store()
+        sql = vs._build_create_table_sql(4)
+        # Should match the static template output
+        assert "id VARCHAR(36) PRIMARY KEY" in sql
+        assert "text LONGTEXT NOT NULL" in sql
+        assert "metadata JSON" in sql
+        assert "embedding VECTOR(4) NOT NULL" in sql
+        assert "VECTOR INDEX (embedding) M=6 DISTANCE=COSINE" in sql
+
+    def test_custom_id_column(self):
+        vs = _make_store(id_column="product_id")
+        sql = vs._build_create_table_sql(4)
+        assert "`product_id` VARCHAR(36) PRIMARY KEY" in sql
+        assert "`product_id`" in sql
+
+    def test_custom_content_column(self):
+        vs = _make_store(content_column="description")
+        sql = vs._build_create_table_sql(4)
+        assert "`description` LONGTEXT NOT NULL" in sql
+
+    def test_custom_embedding_column(self):
+        vs = _make_store(embedding_column="vec")
+        sql = vs._build_create_table_sql(1536)
+        assert "`vec` VECTOR(1536) NOT NULL" in sql
+        assert "VECTOR INDEX (`vec`)" in sql
+
+    def test_custom_metadata_json_column(self):
+        vs = _make_store(metadata_json_column="extra")
+        sql = vs._build_create_table_sql(4)
+        assert "`extra` JSON" in sql
+        assert "`metadata`" not in sql  # default name should not appear
+
+    def test_no_metadata_json_column(self):
+        """When metadata_json_column=None, no JSON column in DDL."""
+        vs = _make_store(
+            metadata_json_column=None,
+            metadata_column_names=["price"],
+        )
+        sql = vs._build_create_table_sql(4)
+        assert "JSON" not in sql
+
+    def test_metadata_columns_with_column_objects(self):
+        """Column objects provide type info for DDL."""
+        from langchain_polardbx import Column
+
+        cols = [
+            Column("price", "DECIMAL(10,2)"),
+            Column("category", "VARCHAR(100)", nullable=False),
+        ]
+        vs = _make_store(
+            metadata_column_objs=cols,
+            metadata_column_names=["price", "category"],
+        )
+        sql = vs._build_create_table_sql(4)
+        assert "`price` DECIMAL(10,2)" in sql
+        assert "`category` VARCHAR(100) NOT NULL" in sql
+
+    def test_metadata_column_with_default(self):
+        from langchain_polardbx import Column
+
+        col = Column("status", "VARCHAR(20)", default="'active'")
+        vs = _make_store(
+            metadata_column_objs=[col],
+            metadata_column_names=["status"],
+        )
+        sql = vs._build_create_table_sql(4)
+        assert "`status` VARCHAR(20) DEFAULT 'active'" in sql
+
+    def test_custom_columns_with_partition(self):
+        """Custom columns + partition clause works together."""
+        from langchain_polardbx import Column
+
+        vs = _make_store(
+            id_column="product_id",
+            partition_by="HASH",
+            partitions=4,
+            metadata_column_objs=[Column("price", "INT")],
+            metadata_column_names=["price"],
+        )
+        sql = vs._build_create_table_sql(4)
+        assert "`product_id` VARCHAR(36) PRIMARY KEY" in sql
+        assert "PARTITION BY HASH" in sql
+        assert "PARTITIONS 4" in sql
+        assert "`price` INT" in sql
+
+    def test_custom_columns_distance_strategy(self):
+        """Distance strategy appears in VECTOR INDEX clause."""
+        vs = _make_store(
+            embedding_column="vec",
+            distance_strategy="euclidean",
+        )
+        # Need to set distance_strategy properly
+        vs._distance_strategy = "euclidean"
+        sql = vs._build_create_table_sql(4)
+        assert "DISTANCE=EUCLIDEAN" in sql
+
+    def test_has_custom_columns_flag(self):
+        """_has_custom_columns property detects custom config."""
+        vs = _make_store()
+        assert not vs._has_custom_columns
+
+        vs2 = _make_store(id_column="pid")
+        assert vs2._has_custom_columns
+
+        vs3 = _make_store(metadata_column_names=["price"])
+        assert vs3._has_custom_columns
+
+        vs4 = _make_store(metadata_json_column="extra")
+        assert vs4._has_custom_columns
+
+
+# ===========================================================================
+# 9. Custom column support — UPSERT SQL and values builder
+# ===========================================================================
+
+
+class TestUpsertSqlBuilder:
+    """Test _build_upsert_sql and _build_upsert_values."""
+
+    def test_default_upsert_sql(self):
+        """No custom columns → same as SQL_UPSERT template."""
+        vs = _make_store()
+        sql = vs._build_upsert_sql()
+        assert "INSERT INTO `test_table`" in sql
+        assert "id, text, metadata, embedding" in sql
+        assert "VEC_FROMTEXT(%s)" in sql
+        assert "ON DUPLICATE KEY UPDATE" in sql
+
+    def test_custom_upsert_sql_column_names(self):
+        vs = _make_store(
+            id_column="product_id",
+            content_column="description",
+            embedding_column="vec",
+            metadata_json_column="extra",
+        )
+        sql = vs._build_upsert_sql()
+        assert "`product_id`, `description`, `extra`, `vec`" in sql
+        assert "ON DUPLICATE KEY UPDATE" in sql
+        assert "`description` = VALUES(`description`)" in sql
+        assert "`vec` = VALUES(`vec`)" in sql
+        # id column should NOT be in the UPDATE clause
+        assert "`product_id` = VALUES" not in sql
+
+    def test_upsert_sql_with_metadata_columns(self):
+        from langchain_polardbx import Column
+
+        vs = _make_store(
+            metadata_column_objs=[
+                Column("price", "DECIMAL(10,2)"),
+                Column("category", "VARCHAR(100)"),
+            ],
+            metadata_column_names=["price", "category"],
+        )
+        sql = vs._build_upsert_sql()
+        assert "`price`, `category`" in sql
+        assert "`price` = VALUES(`price`)" in sql
+        assert "`category` = VALUES(`category`)" in sql
+
+    def test_upsert_sql_no_json_column(self):
+        vs = _make_store(
+            metadata_json_column=None,
+            metadata_column_names=["price"],
+        )
+        sql = vs._build_upsert_sql()
+        # No JSON column in INSERT
+        assert "metadata" not in sql.lower()
+        assert "`price`" in sql
+
+    def test_default_upsert_values(self):
+        vs = _make_store()
+        vals = vs._build_upsert_values("id1", "hello", {"k": "v"}, "vec_str")
+        assert vals == ("id1", "hello", '{"k": "v"}', "vec_str")
+
+    def test_custom_upsert_values_with_metadata_split(self):
+        """Metadata keys mapped to columns are extracted; rest goes to JSON."""
+        from langchain_polardbx import Column
+
+        vs = _make_store(
+            metadata_column_objs=[Column("price", "INT")],
+            metadata_column_names=["price"],
+        )
+        metadata = {"price": 100, "category": "electronics", "tags": "new"}
+        vals = vs._build_upsert_values("id1", "text", metadata, "vec_str")
+        # Order: id, text, json(remaining), vec, price
+        assert vals[0] == "id1"
+        assert vals[1] == "text"
+        # JSON should contain only unmapped keys
+        import json as _json
+
+        remaining = _json.loads(vals[2])
+        assert "category" in remaining
+        assert "tags" in remaining
+        assert "price" not in remaining
+        assert vals[3] == "vec_str"
+        assert vals[4] == 100
+
+    def test_upsert_values_no_json_column(self):
+        """When JSON column is disabled, mapped values still extracted."""
+        vs = _make_store(
+            metadata_json_column=None,
+            metadata_column_names=["price"],
+        )
+        metadata = {"price": 50, "other": "data"}
+        vals = vs._build_upsert_values("id1", "text", metadata, "vec_str")
+        # Order: id, text, vec, price (no json column)
+        assert vals == ("id1", "text", "vec_str", 50)
+
+    def test_upsert_values_missing_metadata_key(self):
+        """Missing mapped key yields None for that column."""
+        vs = _make_store(
+            metadata_column_names=["price"],
+        )
+        vals = vs._build_upsert_values("id1", "text", {}, "vec_str")
+        # price should be None (metadata.get returns None)
+        assert vals[-1] is None
+
+    def test_upsert_sql_and_values_order_match(self):
+        """Column order in SQL must match values tuple order."""
+        from langchain_polardbx import Column
+
+        vs = _make_store(
+            id_column="pid",
+            content_column="desc",
+            embedding_column="emb",
+            metadata_json_column="meta",
+            metadata_column_objs=[
+                Column("price", "INT"),
+                Column("brand", "VARCHAR(50)"),
+            ],
+            metadata_column_names=["price", "brand"],
+        )
+        sql = vs._build_upsert_sql()
+        vals = vs._build_upsert_values(
+            "x1", "hello", {"price": 10, "brand": "Nike", "extra": "data"}, "v"
+        )
+
+        # SQL column order: pid, desc, meta, emb, price, brand
+        assert "`pid`, `desc`, `meta`, `emb`, `price`, `brand`" in sql
+
+        # Values order: id, text, json, vec, price, brand
+        assert vals[0] == "x1"       # pid
+        assert vals[1] == "hello"   # desc
+        # vals[2] is JSON of remaining metadata
+        assert vals[3] == "v"       # emb
+        assert vals[4] == 10        # price
+        assert vals[5] == "Nike"    # brand
+
+
+# ===========================================================================
+# 10. Custom column support — SELECT SQL and result mapping
+# ===========================================================================
+
+
+class TestSelectSqlAndMapping:
+    """Test _build_select_columns, _build_search_sql, _build_get_by_ids_sql,
+    and _record_to_metadata."""
+
+    def test_default_select_columns(self):
+        vs = _make_store()
+        assert vs._build_select_columns() == "id, text, metadata"
+
+    def test_custom_select_columns(self):
+        vs = _make_store(
+            id_column="product_id",
+            content_column="description",
+            metadata_json_column="extra",
+        )
+        cols = vs._build_select_columns()
+        assert "`product_id` AS `id`" in cols
+        assert "`description` AS `text`" in cols
+        assert "`extra` AS `metadata`" in cols
+
+    def test_select_columns_no_json(self):
+        vs = _make_store(
+            metadata_json_column=None,
+            metadata_column_names=["price"],
+        )
+        cols = vs._build_select_columns()
+        assert "AS `metadata`" not in cols
+        assert "`price`" in cols
+
+    def test_select_columns_with_metadata_cols(self):
+        vs = _make_store(
+            metadata_column_names=["price", "category"],
+        )
+        cols = vs._build_select_columns()
+        assert "`price`" in cols
+        assert "`category`" in cols
+
+    def test_default_search_sql(self):
+        vs = _make_store()
+        sql = vs._build_search_sql(
+            distance_func="VEC_DISTANCE",
+            index_hint="",
+            where_clause="",
+        )
+        assert "SELECT id, text, metadata" in sql
+        assert "VEC_DISTANCE(`embedding`, VEC_FROMTEXT(%s)) AS distance" in sql
+        assert "ORDER BY distance" in sql
+        assert "LIMIT %s" in sql
+
+    def test_custom_search_sql(self):
+        vs = _make_store(
+            id_column="pid",
+            content_column="desc",
+            embedding_column="emb",
+            metadata_json_column="meta",
+        )
+        sql = vs._build_search_sql(
+            distance_func="VEC_DISTANCE",
+            index_hint=" /*+ FORCE_INDEX */",
+            where_clause="WHERE 1=1",
+        )
+        assert "`pid` AS `id`" in sql
+        assert "`desc` AS `text`" in sql
+        assert "`meta` AS `metadata`" in sql
+        assert "VEC_DISTANCE(`emb`, VEC_FROMTEXT(%s))" in sql
+        assert "/*+ FORCE_INDEX */" in sql
+        assert "WHERE 1=1" in sql
+
+    def test_default_get_by_ids_sql(self):
+        vs = _make_store()
+        sql = vs._build_get_by_ids_sql("%s,%s")
+        assert "SELECT id, text, metadata" in sql
+        assert "WHERE `id` IN (%s,%s)" in sql
+
+    def test_custom_get_by_ids_sql(self):
+        vs = _make_store(id_column="product_id")
+        sql = vs._build_get_by_ids_sql("%s,%s,%s")
+        assert "`product_id` AS `id`" in sql
+        assert "WHERE `product_id` IN (%s,%s,%s)" in sql
+
+    def test_default_record_to_metadata(self):
+        vs = _make_store()
+        record = {"metadata": '{"k": "v"}'}
+        meta = vs._record_to_metadata(record)
+        assert meta == {"k": "v"}
+
+    def test_default_record_to_metadata_dict(self):
+        """If driver returns dict (not str), pass through."""
+        vs = _make_store()
+        record = {"metadata": {"k": "v"}}
+        meta = vs._record_to_metadata(record)
+        assert meta == {"k": "v"}
+
+    def test_default_record_to_metadata_empty(self):
+        vs = _make_store()
+        record = {"metadata": None}
+        meta = vs._record_to_metadata(record)
+        assert meta == {}
+
+    def test_custom_record_to_metadata_merge(self):
+        """JSON column + mapped columns are merged."""
+        vs = _make_store(
+            metadata_column_names=["price", "category"],
+        )
+        record = {
+            "metadata": '{"tags": "new"}',  # JSON remainder
+            "price": 100,
+            "category": "electronics",
+        }
+        meta = vs._record_to_metadata(record)
+        assert meta["tags"] == "new"
+        assert meta["price"] == 100
+        assert meta["category"] == "electronics"
+
+    def test_custom_record_to_metadata_no_json(self):
+        """When JSON column is None, only mapped columns are used."""
+        vs = _make_store(
+            metadata_json_column=None,
+            metadata_column_names=["price"],
+        )
+        record = {"price": 50}
+        meta = vs._record_to_metadata(record)
+        assert meta == {"price": 50}
+
+    def test_custom_record_to_metadata_null_mapped(self):
+        """None values from mapped columns are skipped."""
+        vs = _make_store(
+            metadata_column_names=["price", "category"],
+        )
+        record = {
+            "metadata": '{"tags": "new"}',
+            "price": 100,
+            "category": None,
+        }
+        meta = vs._record_to_metadata(record)
+        assert "price" in meta
+        assert "category" not in meta  # None values skipped
+
+    def test_custom_record_to_metadata_mapped_overrides_json(self):
+        """Mapped column values take precedence over JSON."""
+        vs = _make_store(
+            metadata_column_names=["price"],
+        )
+        record = {
+            "metadata": '{"price": 50, "tags": "new"}',
+            "price": 100,  # mapped column value overrides JSON
+        }
+        meta = vs._record_to_metadata(record)
+        assert meta["price"] == 100  # mapped column wins
+        assert meta["tags"] == "new"  # JSON-only key preserved
+
+
+# ===========================================================================
+# 11. Custom column support — Filter logic (mapped vs JSON_EXTRACT)
+# ===========================================================================
+
+
+class TestFilterClauseCustom:
+    """Test _build_filter_clause with custom columns."""
+
+    def test_default_filter_uses_json_extract(self):
+        """Default schema: filter uses JSON_EXTRACT(metadata, ...)."""
+        vs = _make_store()
+        where, params = vs._build_filter_clause({"category": "phone"})
+        assert "JSON_EXTRACT(metadata, '$.category')" in where
+        assert params == ["phone"]
+
+    def test_mapped_column_filter_uses_direct_reference(self):
+        """Mapped column: filter uses direct column reference."""
+        vs = _make_store(
+            metadata_column_names=["category", "price"],
+        )
+        where, params = vs._build_filter_clause({"category": "phone"})
+        assert "`category`" in where
+        assert "JSON_EXTRACT" not in where
+        assert params == ["phone"]
+
+    def test_mapped_column_numeric_filter(self):
+        vs = _make_store(
+            metadata_column_names=["price"],
+        )
+        where, params = vs._build_filter_clause({"price": 100})
+        assert "`price` = %s" in where
+        assert "JSON_EXTRACT" not in where
+        assert params == [100]
+
+    def test_mapped_column_operator_filter(self):
+        vs = _make_store(
+            metadata_column_names=["price"],
+        )
+        where, params = vs._build_filter_clause(
+            {"price": {"$gt": 50, "$lt": 200}}
+        )
+        assert "`price` > %s" in where
+        assert "`price` < %s" in where
+        assert "JSON_EXTRACT" not in where
+        assert params == [50, 200]
+
+    def test_mapped_column_in_filter(self):
+        vs = _make_store(
+            metadata_column_names=["category"],
+        )
+        where, params = vs._build_filter_clause(
+            {"category": {"$in": ["phone", "tablet"]}}
+        )
+        assert "`category` IN" in where
+        assert "JSON_EXTRACT" not in where
+        assert params == ["phone", "tablet"]
+
+    def test_unmapped_key_uses_json_extract(self):
+        """Unmapped key with JSON column: falls back to JSON_EXTRACT."""
+        vs = _make_store(
+            metadata_column_names=["price"],
+            metadata_json_column="meta",
+        )
+        where, params = vs._build_filter_clause({"tags": "new"})
+        assert "JSON_EXTRACT(`meta`, '$.tags')" in where
+        assert params == ["new"]
+
+    def test_no_json_column_unmapped_key_raises(self):
+        """No JSON column + unmapped key: raises ValueError."""
+        vs = _make_store(
+            metadata_json_column=None,
+            metadata_column_names=["price"],
+        )
+        with pytest.raises(ValueError, match="Cannot filter on 'tags'"):
+            vs._build_filter_clause({"tags": "new"})
+
+    def test_no_json_column_mapped_key_works(self):
+        """No JSON column + mapped key: works fine."""
+        vs = _make_store(
+            metadata_json_column=None,
+            metadata_column_names=["price"],
+        )
+        where, params = vs._build_filter_clause({"price": 100})
+        assert "`price` = %s" in where
+        assert params == [100]
+
+    def test_mixed_mapped_and_unmapped_filter(self):
+        """Mix of mapped and unmapped keys in same filter."""
+        vs = _make_store(
+            metadata_column_names=["price", "category"],
+            metadata_json_column="meta",
+        )
+        where, params = vs._build_filter_clause({
+            "price": {"$gt": 50},
+            "tags": "new",
+        })
+        # price is mapped → direct column
+        assert "`price` > %s" in where
+        # tags is unmapped → JSON_EXTRACT
+        assert "JSON_EXTRACT(`meta`, '$.tags')" in where
+        assert params == [50, "new"]
+
+    def test_default_filter_preserves_backward_compat(self):
+        """Default schema filter SQL should be identical to pre-custom-column."""
+        vs = _make_store()
+        where, params = vs._build_filter_clause({
+            "category": "phone",
+            "price": {"$gt": 100, "$lt": 1000},
+        })
+        # Must use metadata (no backticks) for backward compat
+        assert "JSON_EXTRACT(metadata, '$.category')" in where
+        assert "JSON_EXTRACT(metadata, '$.price')" in where
+        assert "`metadata`" not in where  # no backticks in default path
+        assert len(params) == 3  # phone, 100, 1000
+
+
+# ===========================================================================
+# 12. Custom column support — DELETE SQL + end-to-end integration
+# ===========================================================================
+
+
+class TestDeleteSqlCustom:
+    """Test _build_delete_by_ids_sql with custom columns."""
+
+    def test_default_delete_sql(self):
+        vs = _make_store()
+        sql = vs._build_delete_by_ids_sql("%s,%s")
+        assert "DELETE FROM `test_table`" in sql
+        assert "WHERE `id` IN (%s,%s)" in sql
+
+    def test_custom_delete_sql(self):
+        vs = _make_store(id_column="product_id")
+        sql = vs._build_delete_by_ids_sql("%s,%s,%s")
+        assert "WHERE `product_id` IN" in sql
+
+    def test_default_partition_column_follows_id_column(self):
+        """_partition_column should default to _id_column when not set."""
+        vs = _make_store(id_column="product_id")
+        assert vs._partition_column == "product_id"
+
+
+class TestEndToEndCustomColumns:
+    """Integration-level tests: SQL consistency across all builders."""
+
+    def test_all_builders_use_consistent_column_names(self):
+        """DDL, UPSERT, SELECT, DELETE all use the same column names."""
+        from langchain_polardbx import Column
+
+        vs = _make_store(
+            id_column="product_id",
+            content_column="description",
+            embedding_column="embed",
+            metadata_json_column="meta",
+            metadata_column_objs=[
+                Column("price", "DECIMAL(10,2)"),
+                Column("category", "VARCHAR(50)"),
+            ],
+            metadata_column_names=["price", "category"],
+        )
+
+        ddl = vs._build_create_table_sql(4)
+        upsert_sql = vs._build_upsert_sql()
+        search_sql = vs._build_search_sql("VEC_DISTANCE", "", "")
+        get_sql = vs._build_get_by_ids_sql("%s")
+        delete_sql = vs._build_delete_by_ids_sql("%s")
+
+        # DDL uses custom column names
+        assert "`product_id` VARCHAR(36) PRIMARY KEY" in ddl
+        assert "`description` LONGTEXT NOT NULL" in ddl
+        assert "`meta` JSON" in ddl
+        assert "`embed` VECTOR(4) NOT NULL" in ddl
+        assert "VECTOR INDEX (`embed`)" in ddl
+
+        # UPSERT uses same column names
+        assert "`product_id`" in upsert_sql
+        assert "`description`" in upsert_sql
+        assert "`meta`" in upsert_sql
+        assert "`embed`" in upsert_sql
+        assert "`price`" in upsert_sql
+        assert "`category`" in upsert_sql
+
+        # SELECT uses aliases for stable record access
+        assert "`product_id` AS `id`" in search_sql
+        assert "`description` AS `text`" in search_sql
+        assert "`meta` AS `metadata`" in search_sql
+        assert "VEC_DISTANCE(`embed`" in search_sql
+
+        # GET uses same aliases
+        assert "`product_id` AS `id`" in get_sql
+
+        # DELETE uses custom id column
+        assert "WHERE `product_id` IN" in delete_sql
+
+    def test_values_tuple_matches_upsert_column_order(self):
+        """The _build_upsert_values output matches _build_upsert_sql columns."""
+        from langchain_polardbx import Column
+
+        vs = _make_store(
+            id_column="pid",
+            content_column="desc",
+            embedding_column="emb",
+            metadata_json_column="meta",
+            metadata_column_objs=[
+                Column("price", "INT"),
+                Column("brand", "VARCHAR(50)"),
+            ],
+            metadata_column_names=["price", "brand"],
+        )
+
+        sql = vs._build_upsert_sql()
+        vals = vs._build_upsert_values(
+            "x1", "hello", {"price": 10, "brand": "Nike", "extra": "data"}, "v"
+        )
+
+        # SQL INSERT columns: pid, desc, meta, emb, price, brand (6 cols)
+        assert "`pid`, `desc`, `meta`, `emb`, `price`, `brand`" in sql
+        # VALUES placeholders: %s, %s, %s, VEC_FROMTEXT(%s), %s, %s (6 vals)
+        assert vals[0] == "x1"  # pid
+        assert vals[1] == "hello"  # desc
+        # vals[2] is json of remaining
+        assert vals[3] == "v"  # emb
+        assert vals[4] == 10  # price
+        assert vals[5] == "Nike"  # brand
+        assert len(vals) == 6
+
+
+# ===========================================================================
+# 14. Audit fix tests — P1-1, P1-2, P2
+# ===========================================================================
+
+
+class TestColumnValidation:
+    """Test Column.__post_init__ validation for data_type and default (P2)."""
+
+    def test_valid_data_types_pass(self):
+        from langchain_polardbx import Column
+
+        for dt in [
+            "VARCHAR(255)", "INT", "BIGINT", "DECIMAL(10,2)",
+            "TEXT", "JSON", "LONGTEXT", "DATETIME", "BOOLEAN",
+            "CHAR(36)", "FLOAT", "DOUBLE",
+        ]:
+            col = Column("test_col", dt)
+            assert col.data_type == dt
+
+    def test_data_type_with_semicolon_raises(self):
+        from langchain_polardbx import Column
+
+        with pytest.raises(ValueError, match="forbidden sequence"):
+            Column("x", "INT; DROP TABLE users")
+
+    def test_data_type_with_comment_raises(self):
+        from langchain_polardbx import Column
+
+        with pytest.raises(ValueError, match="forbidden sequence"):
+            Column("x", "INT-- comment")
+
+    def test_data_type_with_block_comment_raises(self):
+        from langchain_polardbx import Column
+
+        with pytest.raises(ValueError, match="forbidden sequence"):
+            Column("x", "INT /* comment */")
+
+    def test_data_type_with_newline_raises(self):
+        from langchain_polardbx import Column
+
+        with pytest.raises(ValueError, match="forbidden sequence"):
+            Column("x", "INT\nDROP TABLE")
+
+    def test_empty_data_type_raises(self):
+        from langchain_polardbx import Column
+
+        with pytest.raises(ValueError, match="non-empty"):
+            Column("x", "")
+
+    def test_default_with_semicolon_raises(self):
+        from langchain_polardbx import Column
+
+        with pytest.raises(ValueError, match="forbidden sequence"):
+            Column("x", "INT", default="0; DROP TABLE users")
+
+    def test_default_with_comment_raises(self):
+        from langchain_polardbx import Column
+
+        with pytest.raises(ValueError, match="forbidden sequence"):
+            Column("x", "INT", default="0 -- comment")
+
+    def test_default_none_passes(self):
+        from langchain_polardbx import Column
+
+        col = Column("x", "INT", default=None)
+        assert col.default is None
+
+    def test_valid_default_passes(self):
+        from langchain_polardbx import Column
+
+        col = Column("x", "VARCHAR(20)", default="'active'")
+        assert col.default == "'active'"
+
+
+class TestStringMetadataColumnsDDL:
+    """Test DDL generation for string-only metadata_columns (P1-1)."""
+
+    def test_string_columns_get_text_type(self):
+        """String metadata_columns get TEXT type in DDL."""
+        vs = _make_store(
+            metadata_column_names=["category", "price"],
+        )
+        sql = vs._build_create_table_sql(4)
+        assert "`category` TEXT" in sql
+        assert "`price` TEXT" in sql
+
+    def test_mixed_column_and_string(self):
+        """Column objects use their type; strings get TEXT."""
+        from langchain_polardbx import Column
+
+        vs = _make_store(
+            metadata_column_objs=[Column("price", "DECIMAL(10,2)")],
+            metadata_column_names=["price", "category"],
+        )
+        sql = vs._build_create_table_sql(4)
+        assert "`price` DECIMAL(10,2)" in sql
+        assert "`category` TEXT" in sql
+
+    def test_string_only_all_get_text(self):
+        """All string columns get TEXT."""
+        vs = _make_store(
+            metadata_column_names=["a", "b", "c"],
+        )
+        sql = vs._build_create_table_sql(4)
+        assert "`a` TEXT" in sql
+        assert "`b` TEXT" in sql
+        assert "`c` TEXT" in sql
+
+    def test_ddl_and_dml_consistent_for_strings(self):
+        """DDL and UPSERT SQL reference same column names for strings."""
+        vs = _make_store(
+            metadata_column_names=["category", "price"],
+        )
+        ddl = vs._build_create_table_sql(4)
+        upsert_sql = vs._build_upsert_sql()
+
+        # DDL creates these columns
+        assert "`category`" in ddl
+        assert "`price`" in ddl
+
+        # UPSERT references same columns
+        assert "`category`" in upsert_sql
+        assert "`price`" in upsert_sql
+
+
+class TestNotNullValidation:
+    """Test NOT NULL validation in _build_upsert_values (P1-2)."""
+
+    def test_not_null_missing_value_raises(self):
+        from langchain_polardbx import Column
+
+        vs = _make_store(
+            metadata_column_objs=[Column("status", "VARCHAR(20)", nullable=False)],
+            metadata_column_names=["status"],
+        )
+        with pytest.raises(ValueError, match="NOT NULL"):
+            vs._build_upsert_values("id1", "text", {}, "vec_str")
+
+    def test_nullable_missing_value_passes(self):
+        from langchain_polardbx import Column
+
+        vs = _make_store(
+            metadata_column_objs=[Column("status", "VARCHAR(20)", nullable=True)],
+            metadata_column_names=["status"],
+        )
+        # Should not raise; None is inserted
+        vals = vs._build_upsert_values("id1", "text", {}, "vec_str")
+        assert "status" not in {}  # sanity check
+        # The last element should be None
+        assert vals[-1] is None
+
+    def test_not_null_with_value_passes(self):
+        from langchain_polardbx import Column
+
+        vs = _make_store(
+            metadata_column_objs=[Column("status", "VARCHAR(20)", nullable=False)],
+            metadata_column_names=["status"],
+        )
+        vals = vs._build_upsert_values(
+            "id1", "text", {"status": "active"}, "vec_str"
+        )
+        assert vals[-1] == "active"
+
+    def test_string_column_missing_no_validation(self):
+        """String-only columns (no Column obj) can't check nullable."""
+        vs = _make_store(
+            metadata_column_names=["category"],
+        )
+        # Should not raise — we can't know nullable for string-only
+        vals = vs._build_upsert_values("id1", "text", {}, "vec_str")
+        assert vals[-1] is None
+
+    def test_not_null_missing_with_default_still_raises(self):
+        """Even with a DEFAULT, NOT NULL + missing value raises ValueError."""
+        from langchain_polardbx import Column
+
+        vs = _make_store(
+            metadata_column_objs=[
+                Column("status", "VARCHAR(20)", nullable=False, default="'active'")
+            ],
+            metadata_column_names=["status"],
+        )
+        with pytest.raises(ValueError, match="NOT NULL"):
+            vs._build_upsert_values("id1", "text", {}, "vec_str")
+
+    def test_not_null_explicit_none_raises(self):
+        """Explicit None value for NOT NULL column also raises."""
+        from langchain_polardbx import Column
+
+        vs = _make_store(
+            metadata_column_objs=[Column("status", "VARCHAR(20)", nullable=False)],
+            metadata_column_names=["status"],
+        )
+        with pytest.raises(ValueError, match="NOT NULL"):
+            vs._build_upsert_values(
+                "id1", "text", {"status": None}, "vec_str"
+            )

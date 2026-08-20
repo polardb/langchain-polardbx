@@ -1,4 +1,8 @@
-from langchain_polardbx.vectorstores import NotSupportedError, PolarDBXVectorStore
+from langchain_polardbx.vectorstores import (
+    Column,
+    NotSupportedError,
+    PolarDBXVectorStore,
+)
 
 # PolarDBXSQLDatabase requires [sql] extra; import lazily
 try:
@@ -8,9 +12,10 @@ try:
         "PolarDBXVectorStore",
         "PolarDBXSQLDatabase",
         "NotSupportedError",
+        "Column",
         "create_partitioned_table",
     ]
 except ImportError:
-    __all__ = ["PolarDBXVectorStore", "NotSupportedError"]
+    __all__ = ["PolarDBXVectorStore", "NotSupportedError", "Column"]
 
 __version__ = "0.3.1"

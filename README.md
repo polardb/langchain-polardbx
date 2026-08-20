@@ -48,6 +48,7 @@ All transaction isolation levels (READ-COMMITTED, REPEATABLE-READ, SERIALIZABLE)
 - **Full Async Support**: All public methods have async equivalents (`aadd_texts`, `asimilarity_search`, etc.)
 - **Dual-Version Compatibility**: Automatically detects database capabilities and adapts SQL accordingly
 - **Partitioned Table Support**: Create partitioned vector tables with HASH/KEY/RANGE/LIST strategies, broadcast tables, and LOCALITY node assignment
+- **Custom Column Schema**: Customize column names (id, text, embedding, metadata) and map metadata keys to dedicated typed columns for efficient filtering without JSON_EXTRACT overhead
 - **Connection Pooling**: Built-in connection pool with automatic retry logic
 - **SQL Database Integration**: Use PolarDB-X as a SQL database for LangChain agents with automatic DDL reflection compatibility (tab indentation, ENUM spacing, VECTOR type support)
 
@@ -425,7 +426,7 @@ vectorstore = PolarDBXVectorStore(
     database="your-database", embedding=embeddings,
     table_name="partitioned_vectors",
     partition_by="HASH",          # "HASH", "KEY", "RANGE", or "LIST"
-    partition_column="id",        # column to partition on (default: "id")
+    partition_column="id",        # column to partition on (default: same as id_column)
     partitions=8,                 # number of partitions (HASH/KEY only)
 )
 
@@ -531,6 +532,60 @@ Supported partition strategies:
 | `BROADCAST` | (none) | Full table copy on every DN node |
 | `LOCALITY` | `locality` | Pin table to a specific storage node |
 
+### Custom Column Schema
+
+By default, the vector store creates a table with fixed column names: `id`, `text`, `metadata` (JSON), and `embedding`. You can customize these names and add dedicated typed columns for frequently-filtered metadata keys, avoiding `JSON_EXTRACT` overhead for those fields.
+
+```python
+from langchain_polardbx import PolarDBXVectorStore, Column
+
+vectorstore = PolarDBXVectorStore(
+    host="your-host", port=3306, user="your-user", password="your-password",
+    database="your-database", embedding=embeddings,
+    table_name="products",
+    # Customize core column names (all optional, shown with defaults)
+    id_column="product_id",          # default: "id"
+    content_column="description",     # default: "text"
+    embedding_column="embed",         # default: "embedding"
+    metadata_json_column="extra",     # default: "metadata", set None to disable
+    # Map metadata keys to dedicated typed columns for efficient filtering
+    metadata_columns=[
+        Column("category", "VARCHAR(50)", nullable=False),
+        Column("price", "DECIMAL(10,2)"),
+        Column("brand", "VARCHAR(50)"),
+    ],
+)
+
+# When adding texts, mapped keys go to their own columns;
+# remaining keys go to the JSON column (if enabled)
+vectorstore.add_texts(
+    ["Wireless Headphones"],
+    metadatas=[{"category": "audio", "price": 299, "brand": "Sony", "tags": "new"}],
+)
+# → category, price, brand stored in typed columns
+# → tags stored in JSON column "extra"
+
+# Filter on a mapped column uses direct column reference (fast)
+results = vectorstore.similarity_search(
+    "audio", k=5, filter={"category": "audio", "price": {"$gt": 100}}
+)
+# → WHERE `category` = 'audio' AND `price` > 100
+
+# Filter on a non-mapped key uses JSON_EXTRACT (fallback)
+results = vectorstore.similarity_search(
+    "audio", k=5, filter={"tags": "new"}
+)
+# → WHERE JSON_UNQUOTE(JSON_EXTRACT(`extra`, '$.tags')) = 'new'
+```
+
+> **Note**: When `metadata_json_column` is set to `None`, only mapped metadata columns are stored — unmapped keys in metadata are silently dropped. Filtering on unmapped keys will raise `ValueError` since there is no JSON column to query.
+>
+> **Note**: The `partition_column` parameter defaults to the value of `id_column` (not hardcoded `"id"`). If you customize `id_column`, the partition column follows automatically unless explicitly overridden.
+>
+> **Note**: The `Column` class takes `(name, data_type, nullable=True, default=None)`. Use `Column` objects when creating a new table (they generate DDL). Plain strings are also accepted — `metadata_columns=["category", "price"]` — and when auto-creating a table, these columns get `TEXT` type by default. Use `Column` objects instead of strings when you need a specific data type (e.g., `DECIMAL`, `INT`, `VARCHAR(n)`).
+>
+> **Note**: The `default` field is a **raw SQL expression** — string values must include their own quotes (e.g., `default="'active'"`, not `default="active"`). It only affects the `CREATE TABLE` DDL; it does **not** fill in missing values at INSERT time. For `NOT NULL` columns, you must always provide a value in the metadata dict — if a mapped key is missing, a `ValueError` is raised with a clear message pointing to the offending column.
+
 ## Configuration Options
 
 | Parameter | Type | Default | Description |
@@ -553,10 +608,15 @@ Supported partition strategies:
 | `vector_index_name` | str | None | Vector index name for FORCE INDEX hints (auto-detected if None) |
 | `partition_by` | str | None | Partition strategy: `"HASH"`, `"KEY"`, `"RANGE"`, or `"LIST"` |
 | `partitions` | int | 0 | Number of partitions (required for HASH/KEY) |
-| `partition_column` | Optional[str] | None | Column to partition on (defaults to `"id"` at runtime) |
+| `partition_column` | Optional[str] | None | Column to partition on (defaults to `id_column` value at runtime) |
 | `broadcast` | bool | False | Create a broadcast table (full copy on every DN) |
 | `locality` | str | None | Pin table to a specific DN node, e.g. `"dn=node-name"` |
 | `partition_defs` | list | None | Partition definitions for RANGE/LIST (see examples above) |
+| `id_column` | Optional[str] | None | Column name for the primary key (defaults to `"id"` at runtime) |
+| `content_column` | Optional[str] | None | Column name for text content, mapped to `Document.page_content` (defaults to `"text"` at runtime) |
+| `embedding_column` | Optional[str] | None | Column name for the vector embedding (defaults to `"embedding"` at runtime) |
+| `metadata_json_column` | Optional[str] | `"metadata"` | Column name for JSON metadata storage. Set to `None` to disable (requires all metadata keys to be in `metadata_columns`) |
+| `metadata_columns` | Optional[List[Union[Column, str]]] | None | Columns to map metadata keys to dedicated typed columns. `Column` objects carry `data_type` for DDL; strings default to `TEXT` when auto-creating. When `None`, all metadata goes to the JSON column |
 | `**kwargs` | - | - | Additional connection arguments (e.g. `ssl_ca`, `ssl_cert`, `ssl_key`, `ssl_disabled`) |
 
 ## PolarDB-X Vector Functions Used

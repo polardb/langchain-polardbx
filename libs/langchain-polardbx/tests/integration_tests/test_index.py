@@ -300,7 +300,7 @@ def test_detect_vector_index_name():
 
 def test_preload_index():
     """preload_index should succeed on v3, raise NotSupportedError on old."""
-    from _helpers import NotSupportedError
+    from langchain_polardbx import NotSupportedError
 
     vs = make_store(table_name="test_lc_idx_preload")
     vs.add_texts(TEXTS[:1], metadatas=METADATAS[:1])
@@ -320,7 +320,7 @@ def test_preload_index():
 
 def test_preload_check():
     """preload_check should return a dict on v3, raise NotSupportedError on old."""
-    from _helpers import NotSupportedError
+    from langchain_polardbx import NotSupportedError
 
     vs = make_store(table_name="test_lc_idx_plchk")
     vs.add_texts(TEXTS[:1], metadatas=METADATAS[:1])
@@ -344,7 +344,7 @@ def test_preload_check():
 
 def test_explain_index_health():
     """explain_index_health should return metadata on v3, raise NotSupportedError on old."""
-    from _helpers import NotSupportedError
+    from langchain_polardbx import NotSupportedError
 
     vs = make_store(table_name="test_lc_idx_health")
     vs.add_texts(TEXTS[:1], metadatas=METADATAS[:1])
@@ -371,7 +371,7 @@ def test_explain_index_health():
 async def test_async_preload_and_health():
     """Async preload_index/preload_check/explain_index_health on v3,
     NotSupportedError on old."""
-    from _helpers import NotSupportedError
+    from langchain_polardbx import NotSupportedError
 
     vs = make_store(table_name="test_lc_idx_asyncv3")
     await vs.aadd_texts(TEXTS[:1], metadatas=METADATAS[:1])
