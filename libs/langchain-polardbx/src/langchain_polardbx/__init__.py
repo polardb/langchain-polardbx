@@ -18,4 +18,9 @@ try:
 except ImportError:
     __all__ = ["PolarDBXVectorStore", "NotSupportedError", "Column"]
 
-__version__ = "0.3.1"
+try:
+    from importlib.metadata import version as _version
+
+    __version__ = _version("langchain-polardbx")
+except Exception:
+    __version__ = "0.4.1"
