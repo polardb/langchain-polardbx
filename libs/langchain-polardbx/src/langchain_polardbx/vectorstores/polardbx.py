@@ -353,7 +353,8 @@ class PolarDBXVectorStore(VectorStore):
             table_name: The name of the table to store vectors. Defaults to
                 "polardbx_vectors".
             distance_strategy: Distance function for vector search. One of
-                "cosine", "euclidean", or "inner_product" (v3 only).
+                "cosine", "euclidean", or "inner_product" (requires newer
+                PolarDB-X versions).
                 Defaults to "cosine".
             hnsw_m: M parameter for HNSW index (3-200). Higher values = more accurate
                 but slower indexing. Defaults to 6.
@@ -362,9 +363,10 @@ class PolarDBXVectorStore(VectorStore):
                 Defaults to False.
             embedding_dimension: Embedding dimension. If not provided, will be
                 inferred from the embedding model.
-            ef_construction: HNSW build-time candidate list size (5-1000, v3 only).
+            ef_construction: HNSW build-time candidate list size (5-1000,
+                requires newer PolarDB-X versions).
                 Larger values improve index quality at the cost of slower builds.
-                Ignored on old versions. Defaults to None.
+                Ignored on older versions. Defaults to None.
             connection_retries: Number of connection retry attempts. Defaults to 3.
             retry_delay: Delay between retry attempts in seconds. Defaults to 1.0.
             vector_index_name: Name of the vector index for FORCE INDEX hints.
@@ -511,7 +513,7 @@ class PolarDBXVectorStore(VectorStore):
                 "Must be 'cosine', 'euclidean', or 'inner_product'."
             )
 
-        # Validate inner_product requires v3 capability
+        # Validate inner_product requires newer PolarDB-X capability
         # (checked after _detect_capabilities, just store for now)
 
         # Validate partition params
@@ -573,15 +575,15 @@ class PolarDBXVectorStore(VectorStore):
             self.close()
             raise
 
-        # Validate inner_product requires v3 distance functions
+        # Validate inner_product requires newer PolarDB-X distance functions
         if self._distance_strategy == "inner_product" and not self._capabilities.get(
             "vec_distance", False
         ):
             self.close()
             raise NotSupportedError(
-                "distance_strategy='inner_product' requires PolarDB-X v3 "
-                "with VEC_DISTANCE_INNER_PRODUCT support. "
-                "Use 'cosine' or 'euclidean' for old versions."
+                "distance_strategy='inner_product' requires a newer "
+                "PolarDB-X version with VEC_DISTANCE_INNER_PRODUCT support. "
+                "Use 'cosine' or 'euclidean' for older versions."
             )
 
         # Handle table creation
@@ -1109,7 +1111,7 @@ class PolarDBXVectorStore(VectorStore):
         if self._has_custom_columns:
             base_sql = self._build_create_table_sql_custom(dimension)
         else:
-            # Build optional EF_CONSTRUCTION clause (v3 only)
+            # Build optional EF_CONSTRUCTION clause (newer versions only)
             index_extra = ""
             if self._ef_construction is not None and self._capabilities.get(
                 "vec_distance", False
@@ -1141,7 +1143,7 @@ class PolarDBXVectorStore(VectorStore):
         Returns:
             The CREATE TABLE SQL statement.
         """
-        # Build optional EF_CONSTRUCTION clause (v3 only)
+        # Build optional EF_CONSTRUCTION clause (newer versions only)
         index_extra = ""
         if self._ef_construction is not None and self._capabilities.get(
             "vec_distance", False
@@ -1400,14 +1402,14 @@ class PolarDBXVectorStore(VectorStore):
     def _detect_vector_index_name(self) -> Optional[str]:
         """Auto-detect the vector index name.
 
-        On v3 instances, queries ``information_schema.VECTOR_INDEXES``
+        On newer PolarDB-X instances, queries ``information_schema.VECTOR_INDEXES``
         for the index name.  Falls back to ``SHOW CREATE TABLE`` +
         regex parsing on older versions.
         """
         if self._vector_index_name is not None:
             return self._vector_index_name
 
-        # v3: use information_schema.VECTOR_INDEXES view (preferred)
+        # Newer versions: use information_schema.VECTOR_INDEXES view (preferred)
         if self._capabilities.get("vector_indexes_view", False):
             try:
                 with self._get_cursor() as cursor:
@@ -1491,7 +1493,8 @@ class PolarDBXVectorStore(VectorStore):
             distance: Distance function ("COSINE", "EUCLIDEAN", or
                 "INNER_PRODUCT"). Defaults to the store's distance_strategy.
             ef_construction: HNSW build-time candidate list size (5-1000).
-                v3 only; silently ignored on old versions.
+                Requires newer PolarDB-X versions; silently ignored on
+                older versions.
                 Defaults to the store's ef_construction if set.
         """
         self._validate_identifier(index_name, "index name")
@@ -1503,7 +1506,7 @@ class PolarDBXVectorStore(VectorStore):
                 "Must be 'COSINE', 'EUCLIDEAN', or 'INNER_PRODUCT'."
             )
         ef_val = ef_construction or self._ef_construction
-        # Build optional EF_CONSTRUCTION clause (v3 only)
+        # Build optional EF_CONSTRUCTION clause (newer versions only)
         ef_clause = ""
         if ef_val is not None and self._capabilities.get("vec_distance", False):
             ef_clause = f" EF_CONSTRUCTION={ef_val}"
@@ -1564,24 +1567,25 @@ class PolarDBXVectorStore(VectorStore):
             await cursor.fetchall()
         logger.info("OPTIMIZE TABLE executed on %s", self._table_name)
 
-    # ---- P2: v3 Enhanced features (raise NotSupportedError on old versions) ----
+    # ---- Enhanced features (raise NotSupportedError on older versions) ----
 
     def _require_v3(self, feature: str) -> None:
-        """Raise NotSupportedError if v3 capabilities are not available."""
+        """Raise NotSupportedError if enhanced capabilities are not available."""
         if not self._capabilities.get("vec_distance", False):
             raise NotSupportedError(
-                f"{feature} requires PolarDB-X v3 with vector index support. "
-                "Current instance does not support v3 vector features."
+                f"{feature} requires a newer PolarDB-X version "
+                "with vector index support. "
+                "Current instance does not support these vector features."
             )
 
     def preload_index(self) -> None:
-        """Preload the HNSW vector index into memory cache (v3 only).
+        """Preload the HNSW vector index into memory cache.
 
         Loads the entire HNSW auxiliary table graph into the shared cache
         to eliminate cold-start latency on the first query.
 
         Raises:
-            NotSupportedError: If the instance does not support v3 features.
+            NotSupportedError: If the instance does not support these features.
         """
         self._require_v3("preload_index()")
         with self._get_cursor() as cursor:
@@ -1593,7 +1597,7 @@ class PolarDBXVectorStore(VectorStore):
         logger.info("Preloaded vector index for table %s", self._table_name)
 
     def preload_check(self) -> Dict[str, Any]:
-        """Check if preloading the vector index would fit in cache (v3 only).
+        """Check if preloading the vector index would fit in cache.
 
         Estimates the memory required and compares it with
         ``vidx_hnsw_cache_size`` without actually loading.
@@ -1602,7 +1606,7 @@ class PolarDBXVectorStore(VectorStore):
             Dictionary with check results.
 
         Raises:
-            NotSupportedError: If the instance does not support v3 features.
+            NotSupportedError: If the instance does not support these features.
         """
         self._require_v3("preload_check()")
         with self._get_cursor() as cursor:
@@ -1618,7 +1622,7 @@ class PolarDBXVectorStore(VectorStore):
             )
 
     def explain_index_health(self) -> Dict[str, Any]:
-        """Check vector index health and return diagnostics (v3 only).
+        """Check vector index health and return diagnostics.
 
         Combines ``information_schema.VECTOR_INDEXES`` metadata with
         ``EXPLAIN`` output to provide a comprehensive health report.
@@ -1627,7 +1631,7 @@ class PolarDBXVectorStore(VectorStore):
             Dictionary with index metadata and query plan info.
 
         Raises:
-            NotSupportedError: If the instance does not support v3 features.
+            NotSupportedError: If the instance does not support these features.
         """
         self._require_v3("explain_index_health()")
         result: Dict[str, Any] = {}
@@ -1664,7 +1668,7 @@ class PolarDBXVectorStore(VectorStore):
         return result
 
     async def apreload_index(self) -> None:
-        """Async preload the HNSW vector index into memory cache (v3 only)."""
+        """Async preload the HNSW vector index into memory cache."""
         self._require_v3("apreload_index()")
         async with self._aget_cursor() as cursor:
             await cursor.execute(
@@ -1675,7 +1679,7 @@ class PolarDBXVectorStore(VectorStore):
         logger.info("Preloaded vector index for table %s", self._table_name)
 
     async def apreload_check(self) -> Dict[str, Any]:
-        """Async check if preloading would fit in cache (v3 only)."""
+        """Async check if preloading would fit in cache."""
         self._require_v3("apreload_check()")
         async with self._aget_cursor() as cursor:
             await cursor.execute(
@@ -1690,7 +1694,7 @@ class PolarDBXVectorStore(VectorStore):
             )
 
     async def aexplain_index_health(self) -> Dict[str, Any]:
-        """Async check vector index health (v3 only)."""
+        """Async check vector index health."""
         self._require_v3("aexplain_index_health()")
         result: Dict[str, Any] = {}
         async with self._aget_cursor() as cursor:
@@ -1930,7 +1934,7 @@ class PolarDBXVectorStore(VectorStore):
         if not ids:
             return []
         placeholders = ", ".join(["%s"] * len(ids))
-        # Use VEC_TOTEXT if available (v3), otherwise CAST(embedding AS CHAR)
+        # Use VEC_TOTEXT if available (newer versions), otherwise CAST(embedding AS CHAR)
         emb_expr = (
             f"VEC_TOTEXT(`{self._embedding_column}`)"
             if self._capabilities.get("vec_totext", False)
@@ -1971,7 +1975,7 @@ class PolarDBXVectorStore(VectorStore):
         if not ids:
             return []
         placeholders = ", ".join(["%s"] * len(ids))
-        # Use VEC_TOTEXT if available (v3), otherwise CAST(embedding AS CHAR)
+        # Use VEC_TOTEXT if available (newer versions), otherwise CAST(embedding AS CHAR)
         emb_expr = (
             f"VEC_TOTEXT(`{self._embedding_column}`)"
             if self._capabilities.get("vec_totext", False)
@@ -2144,7 +2148,7 @@ class PolarDBXVectorStore(VectorStore):
         dimension = len(embeddings[0])
         self._create_table_if_not_exists(dimension)
 
-        # Validate vector dimensions using VECTOR_DIM if available (v3)
+        # Validate vector dimensions using VECTOR_DIM if available (newer versions)
         if self._capabilities.get("vec_dim", False):
             self._validate_embedding_dimensions(embeddings, dimension)
 
@@ -2403,7 +2407,7 @@ class PolarDBXVectorStore(VectorStore):
         texts = [te[0] for te in text_embeddings_list]
         embeddings = [te[1] for te in text_embeddings_list]
 
-        # Validate vector dimensions using VECTOR_DIM if available (v3)
+        # Validate vector dimensions using VECTOR_DIM if available (newer versions)
         dimension = len(embeddings[0])
         if self._capabilities.get("vec_dim", False):
             self._validate_embedding_dimensions(embeddings, dimension)
@@ -2485,7 +2489,7 @@ class PolarDBXVectorStore(VectorStore):
         texts = [te[0] for te in text_embeddings_list]
         embeddings = [te[1] for te in text_embeddings_list]
 
-        # Validate vector dimensions using VECTOR_DIM if available (v3)
+        # Validate vector dimensions using VECTOR_DIM if available (newer versions)
         dimension = len(embeddings[0])
         if self._capabilities.get("vec_dim", False):
             self._validate_embedding_dimensions(embeddings, dimension)

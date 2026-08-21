@@ -23,4 +23,4 @@ try:
 
     __version__ = _version("langchain-polardbx")
 except Exception:
-    __version__ = "0.4.1"
+    __version__ = "0.4.2"

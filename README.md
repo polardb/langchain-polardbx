@@ -450,7 +450,7 @@ vectorstore = PolarDBXVectorStore(
 )
 ```
 
-> **Note**: Partitioned vector tables are not supported on PolarDB-X v3 instances. The package automatically detects this and raises `NotSupportedError` if you attempt to use partitioning on an incompatible version.
+> **Note**: Partitioned vector tables are not supported on certain newer PolarDB-X versions. The package automatically detects this and raises `NotSupportedError` if you attempt to use partitioning on an incompatible version.
 >
 > **Note**: LIST partitioning is generally not practical for VectorStore tables because the `id` column is a UUID string — LIST requires exact value enumeration, which is infeasible for UUIDs. Use HASH or KEY partitioning for VectorStore tables instead. LIST partitioning is better suited for `create_partitioned_table()` on tables with known, bounded value sets (e.g., region codes).
 
